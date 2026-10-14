@@ -74,10 +74,9 @@ jobs:
             echo "::error::threejs-3d-card.js подозрительно мал ($size байт) — это не однофайловая сборка"
             exit 1
           fi
-          if grep -qE '(import|export)[^"'"'"']*["'"'"']\.\.?/' threejs-3d-card.js; then
-            echo "::error::в threejs-3d-card.js остались относительные импорты — HACS ставит один файл, ему нечего догружать"
-            exit 1
-          fi
+          # Самодостаточность бандла (нет относительных импортов) проверяет
+          # сама сборка — scripts/build.mjs, функция verifyBundle. Регуляркой в
+          # shell это не проверить: на коде three.js бывают ложные срабатывания.
           echo "Состав релиза:"
           ls -la threejs-3d-card.js
           find dist -type f | sort
