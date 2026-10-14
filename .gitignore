@@ -11,6 +11,12 @@ package-lock.json
 # Перед релизом: npm run build && git add dist && git commit.
 # Целостность проверяется тестом test/publish.test.js и CI (release.yml).
 
+# Отчёты прогонов: их создают тесты (dev/test-out.txt) и страницы проверки
+# (dev/report*.json). В репозитории им делать нечего — иначе каждый прогон
+# оставляет «грязное» дерево.
+dev/report*.json
+dev/test-out.txt
+
 # Служебное
 .vscode/
 .idea/
