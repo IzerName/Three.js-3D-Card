@@ -39,32 +39,47 @@ jobs:
       - name: Сборка релиза
         run: npm run build
 
-      - name: Заcommitченный dist не устарел
+      - name: Закоммиченный релиз не устарел
         run: |
-          if ! git diff --exit-code -- dist; then
-            echo "::error::dist/ расходится со сборкой — выполните npm run build и закоммитьте dist/"
+          # HACS ставит то, что лежит в репозитории на теге: однофайловую сборку
+          # threejs-3d-card.js из корня (её выбирает hacs.json → filename) и
+          # раскладку dist/ (дев-стенд и архив для ручной установки).
+          # Если сборка расходится с закоммиченным, релиз уедет со старым кодом.
+          if ! git diff --exit-code -- dist threejs-3d-card.js; then
+            echo "::error::dist/ или threejs-3d-card.js расходятся со сборкой — выполните npm run build и закоммитьте"
             exit 1
           fi
-          echo "dist/ совпадает с результатом сборки"
+          echo "закоммиченный релиз совпадает с результатом сборки"
 
       - name: Проверка состава релиза
         run: |
           set -e
-          for f in threejs-3d-card.js src/card.js src/editor.js \
+          for f in threejs-3d-card.js dist/threejs-3d-card.js src/card.js src/editor.js \
                    src/core/object-model.js src/core/object-rules.js src/core/geometry.js \
                    models/water-tank/manifest.js models/water-tank/scene.js \
-                   models/production-room/manifest.js vendor/three.module.js \
-                   vendor/three-addons/loaders/GLTFLoader.js; do
-            if [ ! -f "dist/$f" ]; then
-              echo "::error::в релизе нет обязательного файла dist/$f"
+                   models/production-room/manifest.js; do
+            if [ ! -f "$f" ]; then
+              echo "::error::в релизе нет обязательного файла $f"
               exit 1
             fi
           done
-          if [ -f "threejs-3d-card.js" ]; then
-            echo "::error::threejs-3d-card.js не должен лежать в корне: HACS тогда скачает только корневые .js"
+          for f in vendor/three.module.js vendor/three-addons/loaders/GLTFLoader.js; do
+            if [ ! -f "dist/$f" ]; then
+              echo "::error::в раскладке dist/ нет обязательного файла $f"
+              exit 1
+            fi
+          done
+          size=$(wc -c < threejs-3d-card.js)
+          if [ "$size" -lt 500000 ]; then
+            echo "::error::threejs-3d-card.js подозрительно мал ($size байт) — это не однофайловая сборка"
+            exit 1
+          fi
+          if grep -qE '(import|export)[^"'"'"']*["'"'"']\.\.?/' threejs-3d-card.js; then
+            echo "::error::в threejs-3d-card.js остались относительные импорты — HACS ставит один файл, ему нечего догружать"
             exit 1
           fi
           echo "Состав релиза:"
+          ls -la threejs-3d-card.js
           find dist -type f | sort
 
       - name: Архив для установки вручную

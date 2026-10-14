@@ -3,6 +3,51 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [0.1.1] — 2026-10-14
+
+### Добавлено
+
+* **Однофайловая сборка `threejs-3d-card.js` в корне репозитория** — её ставит
+  HACS: `hacs.json` → `"filename": "threejs-3d-card.js"`, HACS ищет файл в корне
+  репозитория и скачивает корневые `.js` (у нас он один). Внутри — three.js r160,
+  загрузчики OBJ/MTL/glTF, ядро карточки и встроенные модели, около 911 КБ.
+  После установки карточке на сервере больше ничего не нужно: ни `vendor/`, ни
+  `src/`, ни `models/`.
+* **Проверка однофайловой сборки на стенде** — `dev/probe-bundle.html`: загрузка
+  как модуля, регистрация элементов, публикация API, three.js из бандла, ноль
+  запросов к `vendor/`, `src/` и `models/`, отрисовка кадров, переподключение
+  карточки. Бандл стенд отдаёт по `/bundle/threejs-3d-card.js`, прогон в
+  headless Chrome — `node dev/probe-runner.mjs
+  http://127.0.0.1:8099/dev/probe-bundle.html 25000`.
+* **`test/bundle.test.js`** — проверяет бандл: нет относительных импортов,
+  элементы регистрируются, `window.ThreeJS3DCard` публикуется с отметкой
+  `bundled: true`, three.js поднимается из бандла (`api.loadThree()` →
+  REVISION 160), встроенные модели доступны. Общая эмуляция DOM для
+  `release.test.js` и `bundle.test.js` вынесена в `test/dom-stub.mjs`.
+
+### Исправлено
+
+* **Повторный `attachShadow`.** Когда Lovelace переподключал элемент, карточка
+  падала с `NotSupportedError: Shadow root cannot be created on a host which
+  already hosts a shadow tree`. Теневой корень теперь создаётся один раз и
+  переиспользуется.
+
+### Изменено
+
+* **Импорты three.js и загрузчиков стали литеральными**: вместо вычисляемого URL
+  библиотеки — `import("../../vendor/three.module.js")` в
+  `src/core/three-loader.js` и такие же импорты загрузчиков OBJ/MTL/glTF в
+  `src/core/geometry.js`. Так esbuild подставляет их внутрь однофайловой сборки,
+  а в раскладке `dist/` те же пути работают по сети.
+* **`dist/` — раскладка для стенда и ручной установки**, а не то, что ставит
+  HACS: её отдаёт `npm run serve`, и она же уходит в архив
+  `threejs-3d-card.zip`. Собирается по-прежнему без бандлера.
+* **CI сверяет закоммиченное со сборкой**: `git diff --exit-code -- dist
+  threejs-3d-card.js` — `dist/` и корневой бандл коммитятся вместе, и релизный
+  workflow падает, если они разошлись с `src/` и `models/`.
+* Тестов стало **101** (`npm test`): добавлены `test/bundle.test.js` и проверки
+  раскладки для HACS в `test/publish.test.js`.
+
 ## [0.1.0] — 2025-10-13
 
 Первая версия: одна карточка для всех 3D-сцен.
@@ -50,15 +95,12 @@
   `custom:water-tank-card` и `custom:production-room-card` продолжают
   работать, включая плоские параметры в корне конфигурации.
 * Стенд разработки `dev/harness.html` с демо-состояниями Home Assistant.
-* Сборка без сторонних бандлеров (`scripts/build.mjs`) и локальный
+* Сборка `dist/` без сторонних бандлеров (`scripts/build.mjs`) и локальный
   HTTP-сервер (`scripts/serve.mjs`).
-* **Релизный слой в `dist/`** (закоммичен): точка входа, `src/`, `models/` и
-  `vendor/` — раскладка, совместимая с HACS для многофайловых плагинов. Файл в
-  корне репозитория заставил бы HACS скачать только корневые `.js`, поэтому
-  HACS забирает содержимое `dist/` целиком в
-  `config/www/community/Three.js-3D-Card/`.
-* 96 юнит- и интеграционных тестов (`npm test`), включая проверку раскладки
-  релиза для HACS (`test/publish.test.js`).
+* **Раскладка `dist/`** (закоммичена): точка входа, `src/`, `models/` и
+  `vendor/` — обычные ES-модули для стенда и ручной установки.
+* Юнит- и интеграционные тесты (`npm test`), включая проверку раскладки релиза
+  для HACS (`test/publish.test.js`).
 * Документация: [docs/MODEL_API.md](docs/MODEL_API.md) — контракт модели,
   [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — параметры карточки,
   [docs/HACS.md](docs/HACS.md) — публикация в HACS.

@@ -9,7 +9,7 @@
 export const API_VERSION = 1;
 
 /** Версия продукта (карточки). Отображается в редакторе. */
-export const CARD_VERSION = "0.1.0";
+export const CARD_VERSION = "0.1.1";
 
 /** Имя кастомного элемента карточки. */
 export const CARD_TAG = "threejs-3d-card";
@@ -32,21 +32,17 @@ export const THREE_REVISION = "160";
 export const THREE_CDN_URL = "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js";
 
 /**
- * Путь к встроенному three.js — считается от URL ЭТОГО модуля.
- *
- * Структура каталогов в релизе (совпадает с dist/ и с установкой на сервере):
- *   threejs-3d-card.js      <- entry, ресурс Lovelace
+ * Структура каталогов в релизе:
+ *   threejs-3d-card.js      <- entry, ресурс Lovelace (однофайловая сборка)
  *   src/core/constants.js   <- этот файл
  *   models/…                <- встроенные модели
- *   vendor/three.module.js  <- three.js
+ *   vendor/three.module.js  <- three.js (в раскладке dist/ и при ручной установке)
  *
- * Почему не абсолютным путём: HACS ставит плагин в каталог с именем
- * каталог с именем репозитория как есть и отдаёт его по
- * /hacsfiles/<имя-репозитория>/, а при ручной установке префикс вообще
- * другой (/local/<любая-папка>/). Относительный путь от import.meta.url
- * работает во всех случаях и не зависит от регистра имени каталога.
+ * Путь к three.js строкой здесь не хранится: src/core/three-loader.js
+ * импортирует его литеральным спецификатором "../../vendor/three.module.js",
+ * чтобы однофайловая сборка (scripts/build.mjs) подставила библиотеку внутрь
+ * файла, а раскладка dist/ работала по сети без изменений.
  */
-export const THREE_BUNDLED_URL = new URL("../../vendor/three.module.js", import.meta.url).href;
 
 /** Префикс, под которым HA отдаёт файлы HACS-плагинов. */
 export const HACSFILES_PREFIX = "/hacsfiles";

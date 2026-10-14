@@ -61,6 +61,8 @@ const server = createServer(async (req, res) => {
     // Правило отдачи файлов:
     //   /dev/*                            — стенд разработки (dev/)
     //   /hacsfiles/threejs-3d-card/*      — релиз (dist/), как в Home Assistant
+    //   /bundle/threejs-3d-card.js        — ОДНОФАЙЛОВАЯ сборка из корня репозитория
+    //                                       (именно её ставит HACS; см. dev/probe-bundle.html)
     //   /local/3d/*                       — примеры моделей из skills/examples,
     //                                       ровно по тем путям, что в документации
     //   остальное                         — релиз (dist/)
@@ -69,6 +71,9 @@ const server = createServer(async (req, res) => {
     if (rel.startsWith("/dev/")) {
       base = DEV;
       relPath = rel.slice(5);
+    } else if (rel.startsWith("/bundle/")) {
+      base = ROOT;
+      relPath = rel.slice("/bundle/".length);
     } else if (rel.startsWith("/hacsfiles/threejs-3d-card/")) {
       base = DIST;
       relPath = rel.slice("/hacsfiles/threejs-3d-card/".length);

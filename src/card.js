@@ -169,7 +169,22 @@ class ThreeDModelCard extends HTMLElement {
   }
 
   _mount() {
-    const shadow = this.attachShadow ? this.attachShadow({ mode: "open" }) : null;
+    // Теневой корень создаём ровно один раз на элемент.
+    //
+    // Lovelace переиспользует узлы карточек (и переподключает их при переходе
+    // между панелями), а повторный attachShadow бросает NotSupportedError
+    // «Shadow root cannot be created on a host which already hosts a shadow
+    // tree» — в HA это выглядит как красная плашка с ошибкой фронтенда.
+    let shadow = this.shadowRoot || null;
+    if (!shadow && typeof this.attachShadow === "function") {
+      try {
+        shadow = this.attachShadow({ mode: "open" });
+      } catch (e) {
+        // Теневой корень мог создать кто-то другой (например,
+        // scoped-custom-element-registry) — работаем с тем, что есть.
+        shadow = this.shadowRoot || null;
+      }
+    }
     this._shadow = shadow;
     const root = document.createElement("div");
     root.className = "t3d-root";

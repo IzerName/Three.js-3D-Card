@@ -10,26 +10,32 @@
 //    source = { format: "gltf", url: "/local/3d/models/house.glb" }
 // ============================================================================
 
-/** Базовый путь к загрузчикам относительно этого модуля. */
-const ADDON_BASE = "../../vendor/three-addons/";
+/**
+ * Путь к загрузчикам в многофайловой раскладке (dist/ или ручная установка).
+ * Нужен только для необязательного DRACOLoader: основные загрузчики
+ * подключаются литеральными спецификаторами — см. loadObj/loadGltf.
+ */
+const ADDONS_URL = new URL("../../vendor/three-addons/", import.meta.url).href;
 
-/** Локальная копия three.js, на которую ссылаются аддоны (см. ниже). */
+/** Локальная копия three.js (в однофайловой сборке уже внутри файла). */
 const VENDOR_THREE_URL = new URL("../../vendor/three.module.js", import.meta.url).href;
 
+/** Собрана ли карточка в один файл (тогда vendor/ рядом не нужен). */
+function isBundled() {
+  return typeof window !== "undefined"
+    && window.ThreeJS3DCard
+    && window.ThreeJS3DCard.bundled === true;
+}
+
 /**
- * Загрузчики форматов — официальные аддоны three.js, собранные вместе с
- * карточкой (vendor/three-addons). В их коде импорт three.js переписан сборкой
- * на относительный путь ../../three.module.js (см. scripts/build.mjs), поэтому
- * аддоны берут ровно ту же копию библиотеки, что и карточка, — при любой
- * установке: /hacsfiles/<имя-репозитория>/, /local/<любая-папка>/ и т. д.
- *
- * Проверка ниже нужна для случая, когда релиз собран неполно (например,
- * каталог vendor/ не скопирован на сервер): тогда первый же OBJ/GLB упадёт
- * с невнятной ошибкой импорта, и лучше объяснить причину заранее.
+ * В однофайловой сборке загрузчики форматов и three.js уже внутри файла, поэтому
+ * проверять доступность vendor/ не нужно. В многофайловой раскладке проверка
+ * полезна: если каталог vendor/ не скопирован на сервер, первый же OBJ/GLB упадёт
+ * с невнятной ошибкой импорта — лучше объяснить причину заранее.
  */
 let addonCheckStarted = false;
 async function checkAddonThree() {
-  if (addonCheckStarted || typeof fetch !== "function") return;
+  if (addonCheckStarted || typeof fetch !== "function" || isBundled()) return;
   addonCheckStarted = true;
   const url = VENDOR_THREE_URL;
   try {
@@ -110,12 +116,16 @@ async function loadOnce(ctx, src) {
 // ---- OBJ + MTL --------------------------------------------------------------
 
 async function loadObj(ctx, src) {
-  const { OBJLoader } = await import(`${ADDON_BASE}loaders/OBJLoader.js`);
+  // Спецификаторы ЛИТЕРАЛЬНЫЕ намеренно: в однофайловой сборке
+  // (threejs-3d-card.js в корне репозитория) сборщик подставляет сюда код
+  // загрузчиков, и в релизе они уже внутри файла; в раскладке dist/ и при
+  // ручной установке те же пути ведут в vendor/three-addons.
+  const { OBJLoader } = await import("../../vendor/three-addons/loaders/OBJLoader.js");
   const loader = new OBJLoader();
 
   if (src.mtl) {
     try {
-      const { MTLLoader } = await import(`${ADDON_BASE}loaders/MTLLoader.js`);
+      const { MTLLoader } = await import("../../vendor/three-addons/loaders/MTLLoader.js");
       const mtlLoader = new MTLLoader();
       if (ctx.THREE) mtlLoader.setResourcePath(resourcePath(src.url));
       const materials = await mtlLoader.loadAsync(src.mtl);
@@ -141,14 +151,17 @@ function resourcePath(url) {
 // ---- glTF / GLB -------------------------------------------------------------
 
 async function loadGltf(ctx, src) {
-  const { GLTFLoader } = await import(`${ADDON_BASE}loaders/GLTFLoader.js`);
+  const { GLTFLoader } = await import("../../vendor/three-addons/loaders/GLTFLoader.js");
   const loader = new GLTFLoader();
 
   // Draco-сжатие: декодер не входит в поставку (это ~1 МБ бинарных файлов).
-  // Если модель сжата, пользователь указывает путь к декодеру.
+  // Если модель сжата, пользователь указывает путь к декодеру. Сам загрузчик
+  // DRACOLoader есть только в многофайловой раскладке, поэтому спецификатор
+  // здесь вычисляемый: в однофайловой сборке попытка просто не удастся и
+  // пользователь получит понятное предупреждение.
   if (src.dracoPath) {
     try {
-      const { DRACOLoader } = await import(`${ADDON_BASE}loaders/DRACOLoader.js`);
+      const { DRACOLoader } = await import(`${ADDONS_URL}loaders/DRACOLoader.js`);
       const draco = new DRACOLoader();
       draco.setDecoderPath(src.dracoPath);
       loader.setDRACOLoader(draco);

@@ -73,12 +73,21 @@ test("hacs.json: homeassistant задан как версия вида YYYY.M.P"
 
 // ---- 2. выбор режима установки ---------------------------------------------
 
-test("точки входа нет в корне (иначе HACS выберет режим «только корневые .js»)", async () => {
-  assert.equal(await exists(path.join(ROOT, ENTRY)), false,
-    `в корне репозитория не должно быть ${ENTRY}: HACS скачал бы только корневые .js, ` +
-    "и карточка осталась бы без src/, models/ и vendor/");
+test("точка входа для HACS — самодостаточный бандл в корне", async () => {
+  assert.ok(await exists(path.join(ROOT, ENTRY)),
+    `нет ${ENTRY} в корне репозитория — именно этот файл ставит HACS (hacs.json → filename). ` +
+    "Соберите релиз: npm run build");
   assert.ok(await exists(path.join(DIST, ENTRY)),
-    `нет dist/${ENTRY} — выполните npm run build и закоммитьте dist/`);
+    `нет dist/${ENTRY} — это раскладка дев-стенда и ручной установки: npm run build`);
+  const bundle = await fs.readFile(path.join(ROOT, ENTRY), "utf8");
+  assert.ok(bundle.length > 500 * 1024, "корневой файл не похож на однофайловую сборку — пересоберите её");
+});
+
+test("HACS скачает из корня только бандл: других корневых .js нет", async () => {
+  const entries = await fs.readdir(ROOT, { withFileTypes: true });
+  const rootJs = entries.filter((e) => e.isFile() && e.name.endsWith(".js")).map((e) => e.name);
+  assert.deepEqual(rootJs, [ENTRY],
+    `в корне лежат лишние .js (${rootJs.join(", ")}): HACS скачивает из корня все .js файлы`);
 });
 
 test("dist закоммичен: он не должен попадать в .gitignore", async () => {
@@ -158,8 +167,16 @@ test("в исходниках карточки нет жёстких путей 
   }
 });
 
-test("путь к three.js считается от модуля, а не задан строкой", async () => {
-  const code = await fs.readFile(path.join(ROOT, "src/core/constants.js"), "utf8");
-  assert.match(code, /THREE_BUNDLED_URL\s*=\s*new URL\(/,
-    "THREE_BUNDLED_URL должен вычисляться от import.meta.url");
+test("three.js и загрузчики подключаются литеральными спецификаторами", async () => {
+  // Литеральный import() — единственный способ, которым сборщик может
+  // подставить модуль внутрь однофайлового релиза. Если спецификатор собран из
+  // частей, бандл останется без three.js или без загрузчиков форматов.
+  const loader = await fs.readFile(path.join(ROOT, "src/core/three-loader.js"), "utf8");
+  assert.match(loader, /import\(\s*["']\.\.\/\.\.\/vendor\/three\.module\.js["']\s*\)/,
+    "в src/core/three-loader.js нет литерального импорта vendor/three.module.js");
+  const geometry = await fs.readFile(path.join(ROOT, "src/core/geometry.js"), "utf8");
+  for (const addon of ["OBJLoader.js", "MTLLoader.js", "GLTFLoader.js"]) {
+    assert.match(geometry, new RegExp(`import\\(\\s*["']\\.\\./\\.\\./vendor/three-addons/loaders/${addon}["']\\s*\\)`),
+      `в src/core/geometry.js нет литерального импорта ${addon}`);
+  }
 });

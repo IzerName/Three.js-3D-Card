@@ -4,10 +4,27 @@
 //  без доступа в интернет.
 // ============================================================================
 
-import { THREE_MODE, THREE_CDN_URL, THREE_BUNDLED_URL } from "./constants.js";
+import { THREE_MODE, THREE_CDN_URL } from "./constants.js";
 
 let promise = null;
 let loaded = null;
+
+/**
+ * Локальная копия three.js.
+ *
+ * Спецификатор ЛИТЕРАЛЬНЫЙ намеренно: в однофайловой сборке
+ * (threejs-3d-card.js в корне репозитория) сборщик подставляет сюда саму
+ * библиотеку, и в релизе она уже внутри файла — догружать ничего не нужно.
+ * В раскладке dist/ и при ручной установке тот же путь ведёт в
+ * vendor/three.module.js, и файл просто приходит по сети. Один и тот же код
+ * работает в обоих случаях, поэтому имя каталога установки здесь не участвует.
+ */
+async function importBundled() {
+  const mod = await import("../../vendor/three.module.js");
+  const THREE = mod && mod.default && mod.default.Scene ? mod.default : mod;
+  if (!THREE || !THREE.Scene) throw new Error("модуль не содержит three.js");
+  return THREE;
+}
 
 /** Загрузить three.js (одна попытка на страницу, результат кешируется). */
 export function loadThree() {
@@ -17,18 +34,18 @@ export function loadThree() {
   promise = (async () => {
     const attempts = [];
     if (THREE_MODE === "bundled") {
-      attempts.push({ name: "локальный three.js", url: THREE_BUNDLED_URL });
-      attempts.push({ name: "CDN three.js", url: THREE_CDN_URL });
+      attempts.push({ name: "локальный three.js", load: importBundled });
+      attempts.push({ name: "CDN three.js", load: () => import(/* @vite-ignore */ THREE_CDN_URL) });
     } else {
-      attempts.push({ name: "CDN three.js", url: THREE_CDN_URL });
-      attempts.push({ name: "локальный three.js", url: THREE_BUNDLED_URL });
+      attempts.push({ name: "CDN three.js", load: () => import(/* @vite-ignore */ THREE_CDN_URL) });
+      attempts.push({ name: "локальный three.js", load: importBundled });
     }
 
     const errors = [];
     for (const a of attempts) {
       try {
-        const mod = await import(/* @vite-ignore */ a.url);
-        const THREE = mod.default && mod.default.Scene ? mod.default : mod;
+        const mod = await a.load();
+        const THREE = mod && mod.default && mod.default.Scene ? mod.default : mod;
         if (!THREE || !THREE.Scene) throw new Error("модуль не содержит three.js");
         loaded = THREE;
         // Публикуем в глобальном API сразу: внешние модели берут three.js

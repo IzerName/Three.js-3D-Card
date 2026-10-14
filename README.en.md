@@ -9,6 +9,9 @@ Assistant's native entity picker for device selection.
 * three.js **ships with the card** — works fully offline (CDN is optional);
 * install and updates through **HACS**, public releases and CI — repository:
   <https://github.com/IzerName/Three.js-3D-Card>;
+* HACS installs a **single file**, `threejs-3d-card.js` in the repository root,
+  with three.js, the format loaders, the card core and the built-in models
+  inside;
 * import **your own model JS file** straight from the card editor — no rebuild,
   no release required;
 * documented model API: [docs/MODEL_API.md](docs/MODEL_API.md) (Russian).
@@ -22,25 +25,28 @@ Assistant's native entity picker for device selection.
 1. HACS → **Frontend** → ⋮ → **Custom repositories** → add
    `https://github.com/IzerName/Three.js-3D-Card`, category **Dashboard**.
 2. Download **Three.js 3D Card**.
-3. HACS installs the files into `config/www/community/Three.js-3D-Card/` (the
-   directory is the repository name verbatim, case included) and registers the
-   resource itself. If it did not, add one manually:
-   `/hacsfiles/Three.js-3D-Card/threejs-3d-card.js`, type *JavaScript module*.
-   HACS writes the same URL with a `?hacstag=…` version marker and updates that
-   marker on every new release.
+3. HACS puts **one file**, `threejs-3d-card.js`, into
+   `config/www/community/Three.js-3D-Card/` (the directory is the repository
+   name verbatim, case included). That file is the single-file build: three.js
+   r160, the OBJ/MTL/glTF loaders, the card core and the built-in models are all
+   inside, so nothing else — no `src/`, `models/` or `vendor/` — is needed on
+   the server. HACS registers the resource itself. If it did not, add one
+   manually: `/hacsfiles/Three.js-3D-Card/threejs-3d-card.js`, type *JavaScript
+   module*. HACS writes the same URL with a `?hacstag=…` version marker and
+   updates that marker on every new release.
 4. Hard-refresh the page and add the card.
 
 > The case-sensitive directory name is a HACS detail, not a card requirement:
-> three.js and the models are loaded through relative paths, so the card works
-> from any folder (see below).
+> the single-file build is self-contained, and the `dist/` layout (below) loads
+> three.js and the models through relative paths, so it works from any folder.
 
 ### Manual
 
 1. Take `threejs-3d-card.zip` from the
    [release](https://github.com/IzerName/Three.js-3D-Card/releases) (it is the
-   contents of `dist/`) and unpack **all of it** into
-   `config/www/threejs-3d-card/`. The folder name may be anything; keep the
-   structure — `src/`, `models/` and `vendor/` must sit next to
+   contents of `dist/` — the same card as plain ES modules) and unpack **all of
+   it** into `config/www/threejs-3d-card/`. The folder name may be anything;
+   keep the structure — `src/`, `models/` and `vendor/` must sit next to
    `threejs-3d-card.js`.
 2. Add a resource: `/local/threejs-3d-card/threejs-3d-card.js`,
    type *JavaScript module*.
@@ -161,29 +167,46 @@ documented in [docs/MODEL_API.md](docs/MODEL_API.md).
 
 ```bash
 npm install
-npm run build     # build dist/ (three.js + core + models)
+npm run build     # build dist/ and the single-file threejs-3d-card.js in the root
 npm run serve     # dev bench: http://localhost:8099/dev/harness.html
-npm test          # unit and integration tests (96 checks)
+npm test          # unit and integration tests (101 checks)
 npm run check     # build + tests
 ```
 
 The bench fakes `hass.states` with demo values, so scenes and the editor can be
 checked without Home Assistant. It serves the release under
-`/hacsfiles/threejs-3d-card/*` and `/local/threejs-3d-card/*` — those are bench
-URLs, not an installation requirement. `dist/` contains the very same ES modules
-as `src/` plus a built `vendor/` (three.js and the OBJ/MTL/glTF loaders) — no
-bundler, which keeps browser debugging straightforward.
+`/hacsfiles/threejs-3d-card/*` and `/local/threejs-3d-card/*`, and the
+single-file build under `/bundle/threejs-3d-card.js` — those are bench URLs, not
+an installation requirement.
+
+`npm run build` produces **two layouts** from the same sources, and both must
+behave identically:
+
+* `threejs-3d-card.js` in the repository root — the **single-file build**
+  (esbuild): three.js r160, the OBJ/MTL/glTF loaders, the card core and the
+  built-in models inside one ~911 KB file. This is what HACS installs;
+* `dist/` — the same card as plain ES modules (`dist/threejs-3d-card.js` plus
+  `src/`, `models/`, `vendor/`). The bench serves it and it goes into
+  `threejs-3d-card.zip` for manual installation. No bundler is involved here,
+  which keeps browser debugging straightforward.
+
+`dev/probe-bundle.html` checks the single-file build on the bench (module load,
+element registration, API, three.js from inside the bundle, no requests to
+`vendor/`, `src/` or `models/`, rendered frames); the other `dev/probe-*.html`
+pages check the `dist/` layout.
 
 ### Releasing
 
 1. Bump `version` in `package.json` and `CARD_VERSION` in
    `src/core/constants.js`, update `CHANGELOG.md`.
-2. Run `npm run build` and commit the updated `dist/` — HACS installs the files
-   straight from the tag and never builds anything.
+2. Run `npm run build` and commit the updated `dist/` **and the root
+   `threejs-3d-card.js`** — HACS installs the files straight from the tag and
+   never builds anything.
 3. Tag `vX.Y.Z` and push: GitHub Actions
    ([.github/workflows/release.yml](.github/workflows/release.yml)) runs the
-   tests, rebuilds `dist/`, verifies its contents and attaches
-   `threejs-3d-card.zip` to the
+   tests, rebuilds both layouts, verifies that the committed `dist/` and bundle
+   match the build (`git diff --exit-code -- dist threejs-3d-card.js`) and
+   attaches `threejs-3d-card.zip` to the
    [release](https://github.com/IzerName/Three.js-3D-Card/releases).
 4. HACS picks up the new release; the resource needs no reinstall — HACS
    updates the `?hacstag=…` marker itself.
@@ -197,7 +220,8 @@ See [docs/HACS.md](docs/HACS.md) (Russian) for details.
 ```
 threejs-3d-card/
 ├─ hacs.json                    HACS manifest (filename: threejs-3d-card.js)
-├─ dist/                        release layer — committed, this is what HACS installs
+├─ threejs-3d-card.js           single-file build — committed, this is what HACS installs
+├─ dist/                        ES-module layout: dev bench and manual install
 │  ├─ threejs-3d-card.js        entry point (the Lovelace resource)
 │  ├─ src/  models/             card core and models, same files as the sources
 │  └─ vendor/                   three.js r160 + OBJ/MTL/glTF loaders
@@ -206,17 +230,15 @@ threejs-3d-card/
 ├─ skills/threejs-3d-model/     agent skill: spec, validator, examples
 ├─ docs/                        MODEL_API, OBJECT_MODEL, CONFIGURATION, HACS
 ├─ dev/                         dev bench and browser self-check pages
-├─ scripts/                     build.mjs (builds dist/), serve.mjs (dev server)
-└─ test/                        unit and integration tests
+├─ scripts/                     build.mjs (dist/ + root bundle), serve.mjs (dev server)
+└─ test/                        unit and integration tests (101)
 ```
 
-The entry point lives in `dist/` on purpose: HACS looks for the `filename` in
-the repository root first and would then download only the root `.js` files —
-without `src/`, `models/` and `vendor/` the card cannot load. With the file in
-`dist/`, HACS takes the whole `dist/` directory into
-`config/www/community/Three.js-3D-Card/` and registers
-`/hacsfiles/Three.js-3D-Card/threejs-3d-card.js?hacstag=…` as a *JavaScript
-module*.
+Both `dist/` and the root `threejs-3d-card.js` are produced by
+`scripts/build.mjs` and committed. HACS looks for the `filename` in the
+repository root and downloads the root `.js` files only — so the root holds the
+single-file build, which needs nothing else on the server. The `dist/` layout
+stays for the bench and the manual-install archive.
 
 ## Licence
 

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>probe-bundle</title>
+<style>
+  :root{--card-background-color:#151a22;--primary-text-color:#e6edf5;--divider-color:rgba(130,150,180,.28);
+        --primary-color:#1f6feb;--secondary-text-color:#8b98a8;--ha-card-border-radius:12px;}
+  body{background:#0b0e13;color:#e6edf5;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0;padding:16px}
+  pre{white-space:pre-wrap}
+</style>
+</head>
+<body>
+<pre id="out"></pre>
+<div id="host" style="width:900px"></div>
+<script type="module">
+// ============================================================================
+//  Проверка ОДНОФАЙЛОВОЙ сборки (threejs-3d-card.js из корня репозитория).
+//
+//  Это ровно тот файл, который ставит HACS, и на сервере рядом с ним нет ни
+//  src/, ни models/, ни vendor/. Поэтому здесь важно убедиться, что бандл:
+//    * регистрирует элементы и публикует window.ThreeJS3DCard;
+//    * поднимает three.js ИЗ СЕБЯ (никаких запросов к vendor/);
+//    * строит сцену встроенной модели и рисует кадры;
+//    * умеет декларативную объектную модель (createObjectModel в API).
+//
+//  Запуск: node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-bundle.html 25000
+// ============================================================================
+
+const out = document.getElementById("out");
+const errors = [];
+const report = { ok: false, steps: [] };
+const log = (s) => { out.textContent += s + "\n"; };
+const step = (name, ok, detail) => {
+  report.steps.push({ name, ok, detail });
+  log(`${ok ? "✔" : "✖"} ${name}${detail ? " — " + detail : ""}`);
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+window.addEventListener("error", (e) => errors.push(String(e.message)));
+window.addEventListener("unhandledrejection", (e) => errors.push(String(e.reason && e.reason.message || e.reason)));
+
+try {
+  const t0 = performance.now();
+  await import("/bundle/threejs-3d-card.js");
+  step("бандл загружен как модуль", true, `${Math.round(performance.now() - t0)} мс`);
+
+  step("элементы зарегистрированы", !!(customElements.get("threejs-3d-card") && customElements.get("threejs-3d-card-editor")));
+  const api = window.ThreeJS3DCard;
+  step("API опубликован", !!api && /^\d+\.\d+\.\d+$/.test(api.version || "") && api.apiVersion === 1,
+    api ? `v${api.version}, apiVersion ${api.apiVersion}, bundled=${api.bundled}` : "нет window.ThreeJS3DCard");
+  step("отметка bundled", api && api.bundled === true);
+  step("createObjectModel доступен", typeof api.createObjectModel === "function");
+
+  const THREE = await api.loadThree();
+  step("three.js внутри бандла", THREE && THREE.Scene && THREE.REVISION === "160", `r${THREE && THREE.REVISION}`);
+  const objLoader = await import("/bundle/threejs-3d-card.js").then(() => true).catch(() => false);
+  step("повторный импорт бандла не ломает страницу", objLoader === true);
+
+  // Главная проверка самодостаточности: ни одного запроса к vendor/ или src/.
+  const ресурсы = performance.getEntriesByType("resource").map((r) => r.name);
+  const лишние = ресурсы.filter((u) => /\/vendor\/|\/src\/|\/models\//.test(u));
+  step("бандл ничего не догружает с сервера", лишние.length === 0,
+    лишние.length ? лишние.join(", ") : `всего запросов: ${ресурсы.length}`);
+
+  // Сцена встроенной модели: карточка должна нарисовать кадры.
+  const card = document.createElement("threejs-3d-card");
+  const states = {
+    "sensor.tank_level": { state: "62", attributes: { unit_of_measurement: "%", friendly_name: "Уровень" } },
+    "sensor.tank_liters": { state: "1200", attributes: { unit_of_measurement: "L" } },
+    "binary_sensor.tank_high": { state: "off", attributes: {} },
+  };
+  card.setConfig({
+    type: "custom:threejs-3d-card",
+    model: "water-tank",
+    height: 320,
+    entities: { level: "sensor.tank_level", liters: "sensor.tank_liters", high: "binary_sensor.tank_high" },
+  });
+  card.hass = { states, locale: { language: "ru" }, callService: async () => {}, callWS: async () => ({}) };
+  document.getElementById("host").appendChild(card);
+  await sleep(2500);
+
+  const canvas = card.shadowRoot && card.shadowRoot.querySelector ? card.shadowRoot.querySelector("canvas") : null;
+  const inner = (card._root || card).querySelector ? (card._root || card).querySelector("canvas") : null;
+  const поверхность = canvas || inner;
+  step("карточка построила сцену", !!поверхность, поверхность ? `${поверхность.width}x${поверхность.height}` : "канвас не найден");
+
+  const engine = card._engine;
+  const calls = engine && engine.renderer && engine.renderer.info ? engine.renderer.info.render.calls : 0;
+  step("кадры рисуются", calls > 0, `вызовов отрисовки: ${calls}`);
+
+  const models = api.builtinIds();
+  step("встроенные модели в бандле", models.includes("water-tank") && models.includes("production-room"), models.join(", "));
+
+  // Lovelace переиспользует элементы и переподключает их (переключение вида,
+  // режим правки). Раньше второй _mount() бросал NotSupportedError
+  // «Shadow root cannot be created on a host which already hosts a shadow tree».
+  const host = document.getElementById("host");
+  host.removeChild(card);
+  await sleep(300);
+  host.appendChild(card);
+  await sleep(1500);
+  const canvasAfter = card.shadowRoot && card.shadowRoot.querySelector
+    ? card.shadowRoot.querySelector("canvas") : null;
+  const callsAfter = card._engine && card._engine.renderer && card._engine.renderer.info
+    ? card._engine.renderer.info.render.calls : 0;
+  step("переподключение карточки не ломает её", !!canvasAfter && errors.length === 0,
+    `канвас: ${canvasAfter ? "есть" : "нет"}, вызовов отрисовки: ${callsAfter}, ошибок JS: ${errors.length}`);
+} catch (e) {
+  errors.push(String(e && e.stack || e));
+  step("выполнение без исключений", false, String(e && e.message || e));
+}
+
+report.ok = report.steps.every((s) => s.ok) && errors.length === 0;
+report.errors = errors;
+log("ИТОГ: " + (report.ok ? "ОК" : "ЕСТЬ ПРОБЛЕМЫ"));
+if (errors.length) log("Ошибки JS:\n" + errors.join("\n"));
+await fetch("/__report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report, null, 2) }).catch(() => {});
+</script>
+</body>
+</html>

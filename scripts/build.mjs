@@ -6,24 +6,25 @@
 //    2. копирует src/ и models/ в dist/ без изменений — структура каталогов
 //       сохраняется, поэтому относительные import в браузере работают как есть;
 //    3. переписывает импорты three.js внутри аддонов на относительный путь;
-//    4. подчищает мёртвые импорты (простая, но безопасная проверка);
-//    5. печатает отчёт о размерах и проверяет, что все import разрешаются.
+//    4. собирает ОДНОФАЙЛОВЫЙ релиз threejs-3d-card.js в корне репозитория
+//       (esbuild: three.js + загрузчики + ядро + встроенные модели внутри);
+//    5. проверяет импорты, состав vendor/ и самодостаточность бандла;
+//    6. печатает отчёт о размерах.
 //
-//  Почему релизный слой — dist/, и почему он закоммичен:
-//    HACS для Dashboard-плагина ищет файл из hacs.json (filename) сначала в
-//    корне репозитория, а если его там нет — в dist/. Наш плагин многофайловый
-//    (ядро + модели + three.js), а из корня HACS скачал бы только корневые .js,
-//    поэтому точка входа обязана лежать в dist/: тогда HACS забирает содержимое
-//    dist/ целиком и кладёт его в config/www/community/<имя-репозитория>/.
-//    Значит dist/ должен быть в git на теге — его обновляют перед релизом.
-//
-//  Почему без esbuild/rollup: сборка должна работать в любом окружении, где
-//  есть только Node.js (в том числе внутри ограниченной песочницы, где
-//  сторонние бинарники не запускаются). Готовый релиз — это обычные ES-модули,
-//  которые Home Assistant отдаёт как статику из config/www/community/.
+//  Две раскладки — намеренно:
+//    * threejs-3d-card.js в корне — то, что ставит HACS. Так работает штатный
+//      режим плагина: HACS ищет файл из hacs.json в корне и скачивает только
+//      корневые .js, а всё остальное уже внутри бандла. Никаких vendor/, src/,
+//      models/ на сервере не требуется — меньше точек отказа.
+//    * dist/ — та же карточка обычными ES-модулями: её отдаёт дев-стенд
+//      (scripts/serve.mjs) и она же уходит в архив threejs-3d-card.zip для
+//      ручной установки. Обе раскладки собираются из одних исходников.
+//    Перед релизом: npm run build && git add -A && git commit (dist/ и бандл
+//    должны быть в теге — HACS ставит именно то, что лежит в репозитории).
 // ============================================================================
 
 import { promises as fs } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +33,28 @@ const DIST = path.join(ROOT, "dist");
 const SRC = path.join(ROOT, "src");
 const MODELS = path.join(ROOT, "models");
 const VENDOR = path.join(DIST, "vendor");
+
+/**
+ * Однофайловая сборка — то, что HACS подключает ресурсом Lovelace.
+ *
+ * Почему один файл: HACS для Dashboard-плагина скачивает из корня только
+ * корневые .js, а многофайловая раскладка (dist/ с подкаталогами) на практике
+ * оказывается капризной. В бандле лежит всё сразу, поэтому после установки
+ * карточка не запрашивает с сервера ни одного дополнительного файла.
+ */
+const BUNDLE_OUT = path.join(ROOT, "threejs-3d-card.js");
+
+const BUNDLE_ENTRY_SRC = `// Точка входа однофайловой сборки. Файл создаётся сборкой (scripts/build.mjs).
+// Отметка bundled говорит карточке, что three.js и загрузчики форматов уже
+// внутри файла и проверять каталог vendor/ в рантайме не нужно.
+window.ThreeJS3DCard = Object.assign(window.ThreeJS3DCard || {}, { bundled: true });
+await import("./src/card.js");
+`;
+
+const BUNDLE_BANNER = `// threejs-3d-card — однофайловая сборка для Home Assistant (HACS).
+// Внутри: three.js r160, загрузчики OBJ/MTL/glTF, ядро карточки и встроенные модели.
+// Исходники и несжатая раскладка — в репозитории (src/, models/, dist/).
+// Собрано scripts/build.mjs; правьте исходники, а не этот файл.`;
 
 const THREE_SRC = path.join(ROOT, "node_modules", "three", "build", "three.module.js");
 
@@ -82,10 +105,14 @@ async function main() {
   await copyTree(SRC, path.join(DIST, "src"), files);
   await copyTree(MODELS, path.join(DIST, "models"), files);
 
+  // --- 3b. однофайловый релиз для HACS ---
+  const bundle = await buildBundle(minify);
+
   // --- 4. проверка импортов ---
   const problems = await checkImports(DIST);
   const vendorProblems = await verifyVendor();
   problems.push(...vendorProblems);
+  problems.push(...(await verifyBundle()));
 
   // --- 5. отчёт ---
   const relSize = (n) => `${(n / 1024).toFixed(0)} КБ`;
@@ -93,7 +120,8 @@ async function main() {
   console.log("");
   console.log("  threejs-3d-card — сборка готова");
   console.log("  ------------------------------------------------------------");
-  console.log(`  threejs-3d-card.js       ${relSize(files[0].size).padStart(9)}  (ресурс Lovelace)`);
+  console.log(`  threejs-3d-card.js       ${relSize(bundle.size).padStart(9)}  (КОРЕНЬ репозитория — это ставит HACS)`);
+  console.log(`  dist/threejs-3d-card.js  ${relSize(files[0].size).padStart(9)}  (точка входа раскладки dist/ — стенд и ручная установка)`);
   console.log(`  vendor/three.module.js   ${relSize(vstat.size).padStart(9)}  (three.js r${threeInfo.revision}${threeInfo.minified ? ", minified" : ""})`);
   const addonSize = addons.reduce((s, a) => s + a.size, 0);
   console.log(`  vendor/three-addons/     ${relSize(addonSize).padStart(9)}  (${addons.length} загрузчика: OBJ, MTL, glTF)`);
@@ -250,6 +278,83 @@ async function buildAddons(minify) {
 
 const ADDON_BANNER = (from) => `// three.js addon: ${from} (MIT, © three.js authors).
 // Поставляется с threejs-3d-card; импорт three переписан на локальную копию.`;
+
+// ---- однофайловый релиз -----------------------------------------------------
+
+/**
+ * Собрать threejs-3d-card.js: three.js, загрузчики форматов, ядро и встроенные
+ * модели в одном ES-модуле.
+ *
+ * Литеральные динамические import (three.js в src/core/three-loader.js,
+ * загрузчики в src/core/geometry.js) esbuild подставляет прямо в файл — именно
+ * поэтому в исходниках эти спецификаторы записаны строкой, а не собираются из
+ * частей. Вычисляемые import (модель пользователя по URL, CDN, DRACOLoader)
+ * остаются рантаймовыми — они и должны грузиться по сети.
+ */
+async function buildBundle(minify) {
+  const entry = path.join(DIST, "bundle-entry.js");
+  await fs.writeFile(entry, BUNDLE_ENTRY_SRC, "utf8");
+
+  const cli = path.join(ROOT, "node_modules", "esbuild", "bin", "esbuild");
+  try {
+    await fs.access(cli);
+  } catch {
+    throw new Error("не найден esbuild: выполните npm install (он нужен для однофайловой сборки)");
+  }
+
+  const args = [
+    cli,
+    entry,
+    "--bundle",
+    "--format=esm",
+    "--target=es2022",
+    `--outfile=${BUNDLE_OUT}`,
+    `--banner:js=${BUNDLE_BANNER}`,
+    "--log-level=warning",
+  ];
+  if (minify) args.push("--minify");
+
+  const res = spawnSync(process.execPath, args, { cwd: ROOT, encoding: "utf8" });
+  if (res.error) throw new Error(`esbuild не запустился: ${res.error.message}`);
+  if (res.status !== 0) {
+    throw new Error(`esbuild вернул код ${res.status}: ${(res.stderr || res.stdout || "").trim()}`);
+  }
+
+  const warnings = (res.stderr || "").trim();
+  const stat = await fs.stat(BUNDLE_OUT);
+  return { size: stat.size, warnings };
+}
+
+/**
+ * Проверка самодостаточности бандла.
+ *
+ * Главное требование: ни одного относительного import — иначе браузер после
+ * установки полезет за файлами, которых на сервере нет (HACS скачал один файл).
+ */
+async function verifyBundle() {
+  const problems = [];
+  let code;
+  try {
+    code = await fs.readFile(BUNDLE_OUT, "utf8");
+  } catch {
+    return ["нет файла threejs-3d-card.js в корне репозитория"];
+  }
+
+  const relImport = /(?:^|[^\w$])(?:import|export)\s*(?:[^"'()]*?\sfrom\s*)?["'](\.[^"']*)["']/g;
+  for (const m of code.matchAll(relImport)) {
+    problems.push(`бандл не самодостаточен: остался относительный импорт ${m[1]}`);
+  }
+  if (!/bundled\s*:\s*(?:!0|true)/.test(code)) {
+    problems.push("в бандле нет отметки bundled — проверка vendor/ в рантайме будет ложной");
+  }
+  if (!/REVISION/.test(code)) {
+    problems.push("в бандле не найдена three.js (проверьте литеральный импорт в src/core/three-loader.js)");
+  }
+  if (code.length < 500 * 1024) {
+    problems.push(`бандл подозрительно мал (${Math.round(code.length / 1024)} КБ) — вероятно, часть модулей не попала`);
+  }
+  return problems;
+}
 
 // ---- копирование ------------------------------------------------------------
 
