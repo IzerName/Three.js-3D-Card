@@ -29,14 +29,21 @@ const files = (await fs.readdir(DIR))
 const results = [];
 for (const file of files) {
   const t0 = Date.now();
-  const res = spawnSync(process.execPath, ["--test", path.join(DIR, file)], {
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  // Репортёр задаём явно: Node 20 по умолчанию печатает TAP, Node 22+ — spec.
+  // Без флага сводка выглядела бы по-разному на разных версиях Node, и разбор
+  // результатов зависел бы от того, куда направлен вывод.
+  const res = spawnSync(
+    process.execPath,
+    ["--test", "--test-reporter=spec", path.join(DIR, file)],
+    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+  );
   const output = `${res.stdout || ""}\n${res.stderr || ""}`;
+  // Сводка: "ℹ tests 5" у spec-репортёра и "# tests 5" у TAP — понимаем оба.
   const num = (label) => {
-    const m = output.match(new RegExp(`^\\u2139 ${label} (\\d+)$`, "m"));
-    return m ? Number(m[1]) : null;
+    const spec = output.match(new RegExp(`^\\u2139 ${label} (\\d+)$`, "m"));
+    if (spec) return Number(spec[1]);
+    const tap = output.match(new RegExp(`^# ${label} (\\d+)$`, "m"));
+    return tap ? Number(tap[1]) : null;
   };
   const tests = num("tests");
   results.push({
@@ -47,8 +54,8 @@ for (const file of files) {
     pass: num("pass"),
     fail: num("fail"),
     skipped: num("skipped"),
-    // строки с провалившимися тестами — для сводки
-    failures: output.split(/\r?\n/).filter((l) => /^\s*✖/.test(l)).map((l) => l.trim()),
+    // строки с провалившимися тестами — для сводки (spec и TAP)
+    failures: output.split(/\r?\n/).filter((l) => /^\s*(✖|not ok)/.test(l)).map((l) => l.trim()),
     output,
   });
 }

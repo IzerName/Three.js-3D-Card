@@ -1,15 +1,15 @@
 
   threejs-3d-card — тесты
   --------------------------------------------------------------
-  ✔ core.test.js                22 ok        143 мс
-  ✔ engine-contract.test.js      5 ok        142 мс
-  ✔ external-model.test.js      12 ok        8200 мс
-  ✔ models.test.js               7 ok        156 мс
-  ✔ object-model.test.js         8 ok        245 мс
-  ✔ object-rules.test.js        21 ok        165 мс
-  ✔ publish.test.js             10 ok        177 мс
-  ✔ release.test.js              8 ok        238 мс
-  ✔ scene.test.js                3 ok        180 мс
+  ✔ core.test.js                22 ok        123 мс
+  ✔ engine-contract.test.js      5 ok        119 мс
+  ✔ external-model.test.js      12 ok        8168 мс
+  ✔ models.test.js               7 ok        120 мс
+  ✔ object-model.test.js         8 ok        219 мс
+  ✔ object-rules.test.js        21 ok        138 мс
+  ✔ publish.test.js             10 ok        140 мс
+  ✔ release.test.js              8 ok        220 мс
+  ✔ scene.test.js                3 ok        136 мс
   --------------------------------------------------------------
 
-  всего: 96, успешно: 96, провалено: 0, время: 9.65 с
+  всего: 96, успешно: 96, провалено: 0, время: 9.38 с

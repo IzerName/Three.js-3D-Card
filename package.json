@@ -5,6 +5,9 @@
   "description": "Home Assistant Lovelace card: 3D scenes (three.js) driven by pluggable models with auto-generated config editor",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=20.11"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:debug": "node scripts/build.mjs --no-minify",

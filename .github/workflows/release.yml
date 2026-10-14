@@ -25,7 +25,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Node 22 LTS: та же версия, на которой проект разрабатывается.
+          # Тесты запускаются с явным --test-reporter=spec, поэтому разницы
+          # между версиями репортёра нет (см. test/run.mjs).
+          node-version: "22"
 
       - name: Установка зависимостей
         run: npm install --no-audit --no-fund
