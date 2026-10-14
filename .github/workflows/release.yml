@@ -1,0 +1,86 @@
+name: Release
+
+# Сборка релиза threejs-3d-card.
+#
+# Запускается по тегу vX.Y.Z: собирает dist/ (three.js + ядро + модели),
+# прогоняет тесты и прикладывает архив к GitHub-релизу.
+# HACS ставит плагин из архива репозитория на теге: файла threejs-3d-card.js
+# в корне нет, поэтому HACS находит его в dist/ и забирает содержимое dist/
+# целиком в config/www/community/<имя-репозитория>/. Значит dist/ обязан быть
+# закоммичен, и сборка не должна от него отличаться — это проверяется ниже.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Установка зависимостей
+        run: npm install --no-audit --no-fund
+
+      - name: Тесты
+        run: npm test
+
+      - name: Сборка релиза
+        run: npm run build
+
+      - name: Заcommitченный dist не устарел
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "::error::dist/ расходится со сборкой — выполните npm run build и закоммитьте dist/"
+            exit 1
+          fi
+          echo "dist/ совпадает с результатом сборки"
+
+      - name: Проверка состава релиза
+        run: |
+          set -e
+          for f in threejs-3d-card.js src/card.js src/editor.js \
+                   src/core/object-model.js src/core/object-rules.js src/core/geometry.js \
+                   models/water-tank/manifest.js models/water-tank/scene.js \
+                   models/production-room/manifest.js vendor/three.module.js \
+                   vendor/three-addons/loaders/GLTFLoader.js; do
+            if [ ! -f "dist/$f" ]; then
+              echo "::error::в релизе нет обязательного файла dist/$f"
+              exit 1
+            fi
+          done
+          if [ -f "threejs-3d-card.js" ]; then
+            echo "::error::threejs-3d-card.js не должен лежать в корне: HACS тогда скачает только корневые .js"
+            exit 1
+          fi
+          echo "Состав релиза:"
+          find dist -type f | sort
+
+      - name: Архив для установки вручную
+        run: |
+          cd dist
+          zip -r ../threejs-3d-card.zip . -x '.*'
+
+      - name: Публикация релиза
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: threejs-3d-card.zip
+          generate_release_notes: true
+          body_path: CHANGELOG.md
+          fail_on_unmatched_files: true
+
+      - name: Артефакт сборки (для ручного запуска)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: threejs-3d-card-dist
+          path: dist/

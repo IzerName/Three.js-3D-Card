@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>probe-gltf</title>
+<style>
+  :root{--card-background-color:#151a22;--primary-text-color:#e6edf5;--divider-color:rgba(130,150,180,.28);
+        --primary-color:#1f6feb;--color-2:#2f9df4;--ha-card-border-radius:12px;--secondary-text-color:#8b98a8;}
+  body{background:#0b0e13;color:#e6edf5;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0}
+  threejs-3d-card{display:block;width:900px;height:520px}
+  #log{padding:8px}
+</style>
+</head>
+<body>
+<div id="log">старт…</div>
+<threejs-3d-card id="card"></threejs-3d-card>
+
+<script type="module">
+// Проверка GLTFLoader на формате «.gltf + внешний .bin».
+//
+// Файлов на диске нет. Страница собирает:
+//   1) бинарник (позиции + нормали + индексы)            -> blob-URL бинарника
+//   2) JSON glTF, где buffers[0].uri = blob-URL бинарника -> blob-URL JSON
+// Карточке отдаётся второй URL. Проверяем именно то, ради чего формат .gltf
+// существует отдельно: загрузчик обязан сам сходить по внешней ссылке за
+// буфером (в GLB он лежит внутри контейнера).
+//
+// ВАЖНО: ссылка на бинарник абсолютная (blob:…). Относительное имя файла
+// загрузчик разрешал бы от каталога blob-URL и не нашёл бы ничего.
+const out = [];
+const errors = [];
+const log = (s) => { out.push(s); document.getElementById("log").innerHTML = out.join("<br>"); };
+window.addEventListener("error", (e) => errors.push(`${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => errors.push("unhandled: " + ((e.reason && e.reason.message) || e.reason)));
+const origError = console.error;
+console.error = (...a) => { errors.push(a.map((x) => (x && x.stack) || String(x)).join(" ").split("\n").slice(0, 3).join(" | ")); origError(...a); };
+
+// Учёт blob-запросов: доказывает, что загрузчик сходил и за JSON, и за буфером.
+const blobFetches = [];
+const origFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const u = typeof input === "string" ? input : (input && input.url) || "";
+  if (String(u).startsWith("blob:")) blobFetches.push(String(u));
+  return origFetch(input, init);
+};
+
+// Счётчик вызовов отрисовки WebGL: показывает, рисует ли сцена хоть что-нибудь.
+// Проверка не входит в список обязательных шагов, но без неё «модель построена»
+// ещё не значит «модель видно» (см. manifest.host у объектной модели).
+const drawCalls = { n: 0 };
+for (const cls of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+  if (!cls) continue;
+  for (const m of ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced"]) {
+    if (typeof cls.prototype[m] !== "function") continue;
+    const orig = cls.prototype[m];
+    cls.prototype[m] = function (...a) { drawCalls.n++; return orig.apply(this, a); };
+  }
+}
+
+/** Кто рисует сцену: карточка (свой рендерер) или сама модель (host: external). */
+function renderInfo(card) {
+  try {
+    const e = card._engine;
+    return `рендерер карточки: ${e && e.renderer ? "есть" : "нет"}, внешний хост: ${e && e._externalHost ? "да" : "нет"}, ` +
+      `модель рисует сама: ${e && e._modelHandle && e._modelHandle.external ? "да" : "нет"}, вызовов отрисовки WebGL: ${drawCalls.n}`;
+  } catch (e) {
+    return "диагностика отрисовки недоступна";
+  }
+}
+
+const now = new Date().toISOString();
+const ent = (s, a) => ({ state: s, attributes: a || {}, last_changed: now, last_updated: now });
+const hass = {
+  states: {
+    "light.test_lamp": ent("off", { friendly_name: "Тестовая лампа" }),
+    "binary_sensor.test_door": ent("off", { friendly_name: "Тестовая дверь", device_class: "door" }),
+  },
+  callService() {},
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const report = { ok: false, steps: [], errors, log: out };
+const step = (n, ok, d) => { report.steps.push({ name: n, ok, detail: d }); log(`${ok ? "✔" : "✖"} ${n}${d ? " — " + d : ""}`); };
+
+let posted = false;
+async function post() {
+  if (posted) return;
+  posted = true;
+  report.ok = report.steps.length > 0 && report.steps.every((s) => s.ok) && errors.length === 0;
+  log("ИТОГ: " + (report.ok ? "ОК" : "ЕСТЬ ПРОБЛЕМЫ"));
+  await fetch("/__report", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report, null, 2),
+  }).catch(() => {});
+}
+setTimeout(() => {
+  if (!posted) {
+    step("страховочный таймер 40 с", false, "страница не дошла до конца: смотри шаги выше");
+    post();
+  }
+}, 40000);
+
+async function waitFor(label, cond, timeoutMs = 25000) {
+  const t0 = performance.now();
+  for (;;) {
+    let ok = false;
+    try { ok = !!cond(); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (performance.now() - t0 > timeoutMs) { log("ТАЙМАУТ: " + label); return false; }
+    await sleep(100);
+  }
+}
+
+function cardError(card) {
+  try {
+    const node = card.shadowRoot && card.shadowRoot.querySelector(".t3d-fallback-error");
+    if (node) return node.textContent.replace(/\s+/g, " ").trim().slice(0, 300);
+    const d = card._engine && card._engine.diagnostics ? card._engine.diagnostics() : null;
+    if (d && d.log && d.log.length) return d.log.slice(-3).join(" | ").slice(0, 300);
+  } catch (e) { /* диагностика не должна ломать отчёт */ }
+  return "";
+}
+
+// ---- сборка .gltf + .bin ----------------------------------------------------
+
+/** Куб: 6 граней по 4 вершины (24 вершины, 36 индексов). */
+function cubeData(size) {
+  const h = size / 2;
+  const faces = [
+    { n: [0, 0, 1], q: [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]] },
+    { n: [0, 0, -1], q: [[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]] },
+    { n: [1, 0, 0], q: [[h, -h, h], [h, -h, -h], [h, h, -h], [h, h, h]] },
+    { n: [-1, 0, 0], q: [[-h, -h, -h], [-h, -h, h], [-h, h, h], [-h, h, -h]] },
+    { n: [0, 1, 0], q: [[-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h]] },
+    { n: [0, -1, 0], q: [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]] },
+  ];
+  const positions = [], normals = [], indices = [];
+  faces.forEach((f, fi) => {
+    f.q.forEach((v) => { positions.push(v[0], v[1], v[2]); normals.push(f.n[0], f.n[1], f.n[2]); });
+    const o = fi * 4;
+    indices.push(o, o + 1, o + 2, o, o + 2, o + 3);
+  });
+  return { positions, normals, indices };
+}
+
+/** Отдельный бинарный файл: [позиции][нормали][индексы]. */
+function buildBin(mesh) {
+  const pos = new Float32Array(mesh.positions);
+  const nor = new Float32Array(mesh.normals);
+  const idx = new Uint16Array(mesh.indices);
+  const bin = new Uint8Array(pos.byteLength + nor.byteLength + idx.byteLength);
+  bin.set(new Uint8Array(pos.buffer), 0);
+  bin.set(new Uint8Array(nor.buffer), pos.byteLength);
+  bin.set(new Uint8Array(idx.buffer), pos.byteLength + nor.byteLength);
+  return {
+    bin,
+    views: {
+      pos: { offset: 0, length: pos.byteLength, count: pos.length / 3 },
+      nor: { offset: pos.byteLength, length: nor.byteLength, count: nor.length / 3 },
+      idx: { offset: pos.byteLength + nor.byteLength, length: idx.byteLength, count: idx.length },
+    },
+  };
+}
+
+/** JSON glTF 2.0: два узла, одна сетка, один материал, буфер — по внешней ссылке. */
+function buildGltf(mesh, geometry, binUri) {
+  const v = geometry.views;
+  const min = [0, 1, 2].map((i) => Math.min(...mesh.positions.filter((_, k) => k % 3 === i)));
+  const max = [0, 1, 2].map((i) => Math.max(...mesh.positions.filter((_, k) => k % 3 === i)));
+  return {
+    asset: { version: "2.0", generator: "threejs-3d-card dev/probe-gltf.html" },
+    scene: 0,
+    scenes: [{ name: "ProbeScene", nodes: [0, 1] }],
+    nodes: [
+      { name: "Lamp_Gltf", mesh: 0, translation: [-1.1, 2.2, -0.6] },
+      { name: "Door_Gltf", mesh: 0, translation: [1.1, 0.9, 1.4] },
+    ],
+    meshes: [{ name: "ProbeCube", primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2, material: 0 }] }],
+    materials: [{
+      name: "ProbeMaterial",
+      pbrMetallicRoughness: { baseColorFactor: [0.72, 0.75, 0.8, 1], metallicFactor: 0, roughnessFactor: 0.55 },
+      doubleSided: true,
+    }],
+    // Внешний буфер: имя файла заменил абсолютный blob-URL.
+    buffers: [{ byteLength: geometry.bin.length, uri: binUri }],
+    bufferViews: [
+      { buffer: 0, byteOffset: v.pos.offset, byteLength: v.pos.length, target: 34962 },
+      { buffer: 0, byteOffset: v.nor.offset, byteLength: v.nor.length, target: 34962 },
+      { buffer: 0, byteOffset: v.idx.offset, byteLength: v.idx.length, target: 34963 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: v.pos.count, type: "VEC3", min, max },
+      { bufferView: 1, componentType: 5126, count: v.nor.count, type: "VEC3" },
+      { bufferView: 2, componentType: 5123, count: v.idx.count, type: "SCALAR" },
+    ],
+  };
+}
+
+// ---- объекты модели ---------------------------------------------------------
+
+function objInfo(card, name) {
+  const handle = card._engine && card._engine._modelHandle;
+  const root = handle && handle.root;
+  if (!root) return null;
+  let found = null;
+  root.traverse((n) => { if (n.name === name && !found) found = n; });
+  if (!found) return null;
+  const m = Array.isArray(found.material) ? found.material[0] : found.material;
+  const q = found.quaternion;
+  return {
+    name: found.name,
+    visible: found.visible,
+    color: m && m.color ? `#${m.color.getHexString()}` : null,
+    position: [+found.position.x.toFixed(3), +found.position.y.toFixed(3), +found.position.z.toFixed(3)],
+    world: worldOf(found),
+    quaternion: [+q.x.toFixed(4), +q.y.toFixed(4), +q.z.toFixed(4), +q.w.toFixed(4)],
+  };
+}
+
+/** Мировая позиция узла — то, что видно на экране (учитывает сдвиг модели). */
+function worldOf(node) {
+  const v = new node.position.constructor();
+  node.getWorldPosition(v);
+  return [+v.x.toFixed(3), +v.y.toFixed(3), +v.z.toFixed(3)];
+}
+
+function delta(a, b) {
+  if (!a || !b) return 0;
+  const dp = Math.hypot(b.position[0] - a.position[0], b.position[1] - a.position[1], b.position[2] - a.position[2]);
+  const dq = Math.hypot(
+    b.quaternion[0] - a.quaternion[0], b.quaternion[1] - a.quaternion[1],
+    b.quaternion[2] - a.quaternion[2], b.quaternion[3] - a.quaternion[3]
+  );
+  return Math.max(dp, dq);
+}
+
+/** Источники света, созданные правилами: интенсивность и мировая позиция. */
+function lightsOf(card) {
+  const root = card._engine && card._engine._modelHandle && card._engine._modelHandle.root;
+  const lights = [];
+  if (root) root.traverse((n) => { if (n.isLight) lights.push({ intensity: +n.intensity.toFixed(3), world: worldOf(n) }); });
+  return lights;
+}
+
+function meshInfo(card) {
+  const root = card._engine && card._engine._modelHandle && card._engine._modelHandle.root;
+  const list = [];
+  if (root) root.traverse((n) => {
+    if (n.isMesh && n.geometry) {
+      const p = n.geometry.attributes && n.geometry.attributes.position;
+      list.push(`${n.name || "(без имени)"}:${p ? p.count : 0}`);
+    }
+  });
+  return list;
+}
+
+try {
+  // --- шаг 1: аддоны доступны
+  const addonUrls = [
+    "/hacsfiles/threejs-3d-card/vendor/three.module.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/GLTFLoader.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/utils/BufferGeometryUtils.js",
+  ];
+  const addonState = [];
+  for (const u of addonUrls) {
+    try {
+      const r = await origFetch(u);
+      addonState.push(`${u.split("/").pop()}:${r.status}:${(r.headers.get("content-type") || "").split(";")[0]}`);
+    } catch (e) {
+      addonState.push(`${u.split("/").pop()}:fetch-error:${e.message}`);
+    }
+  }
+  step("аддоны доступны", addonState.every((s) => s.includes(":200:")), addonState.join(" | "));
+
+  // --- шаг 2: GLTFLoader импортируется как модуль
+  let loaderDetail = "";
+  let loaderOk = false;
+  try {
+    const mod = await import("/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/GLTFLoader.js");
+    loaderOk = typeof mod.GLTFLoader === "function";
+    loaderDetail = loaderOk ? `GLTFLoader загружен, экспортов: ${Object.keys(mod).length}` : "в модуле нет класса GLTFLoader";
+  } catch (e) {
+    loaderDetail = `импорт не удался: ${e.message}`;
+  }
+  step("GLTFLoader импортируется", loaderOk, loaderDetail);
+
+  // --- шаг 3: .gltf и внешний .bin собраны
+  const mesh = cubeData(0.4);
+  const geometry = buildBin(mesh);
+  const binUrl = URL.createObjectURL(new Blob([geometry.bin], { type: "application/octet-stream" }));
+  const gltf = buildGltf(mesh, geometry, binUrl);
+  const jsonText = JSON.stringify(gltf);
+  const gltfUrl = URL.createObjectURL(new Blob([jsonText], { type: "model/gltf+json" }));
+  window.__GLTF_URL__ = gltfUrl;         // спецификация модели прочитает его
+  window.__GLTF_BIN_URL__ = binUrl;      // пригодится для диагностики на странице
+
+  const parsed = JSON.parse(jsonText);
+  const bufferUri = parsed.buffers[0].uri;
+  const gltfOk = bufferUri.startsWith("blob:") && parsed.buffers[0].byteLength === geometry.bin.length &&
+    parsed.bufferViews.length === 3 && parsed.accessors[0].count === 24 && parsed.nodes.length === 2;
+  step(".gltf и внешний .bin собраны", gltfOk,
+    `JSON ${jsonText.length} симв., буфер ${geometry.bin.length} Б по ссылке ${bufferUri.slice(0, 28)}…, узлы [${parsed.nodes.map((n) => n.name).join(", ")}]`);
+
+  // --- шаг 4: карточка строит сцену по .gltf со внешней ссылкой на буфер
+  await import("/threejs-3d-card.js");
+  await customElements.whenDefined("threejs-3d-card");
+  const card = document.getElementById("card");
+  card.setConfig({
+    type: "custom:threejs-3d-card",
+    model: "/dev/probe-gltf-model.js",
+    title: "glTF-проба",
+    height: 520,
+    // Ключ = entity из спецификации модели, значение = entity_id Home Assistant.
+    // Без этой карты привязки остаются без сущностей и правила молчат.
+    entities: {
+      "light.test_lamp": "light.test_lamp",
+      "binary_sensor.test_door": "binary_sensor.test_door",
+    },
+  });
+  card.hass = hass;
+
+  const built = await waitFor("сцена построена", () => !!(card._engine && card._engine._modelHandle));
+  const handle = card._engine && card._engine._modelHandle;
+  step("сцена построена", built && !!handle,
+    handle
+      ? `${handle.ruleEngine.objectNames().length} объектов, меши [${meshInfo(card).join(", ")}]; ${renderInfo(card)}`
+      : (cardError(card) || "модель не построена"));
+
+  if (!handle) {
+    step("внешний буфер загружен", false, "сцены нет — судить о буфере нечем");
+    step("имена объектов найдены", false, "сцены нет");
+    step("цвет меняется по состоянию", false, "сцены нет");
+    step("свет включается", false, "сцены нет");
+    step("дверь поворачивается", false, "сцены нет");
+  } else {
+    // --- шаг 5: загрузчик сходил и за JSON, и за внешним буфером
+    const askedBin = blobFetches.includes(binUrl);
+    const askedJson = blobFetches.includes(gltfUrl);
+    const verts = meshInfo(card);
+    const geometryOk = verts.length > 0 && verts.every((s) => s.endsWith(":24"));
+    step("внешний буфер загружен", askedBin && geometryOk,
+      `запросов за .gltf: ${askedJson ? 1 : 0}, за .bin: ${askedBin ? 1 : 0}; всего blob-запросов ${blobFetches.length}; геометрия [${verts.join(", ")}] (ожидается 24 вершины)`);
+
+    // --- шаг 6: имена узлов
+    const names = handle.ruleEngine.objectNames();
+    step("имена объектов найдены",
+      ["Lamp_Gltf", "Door_Gltf"].every((n) => names.includes(n)),
+      names.join(", ").slice(0, 200));
+    step("правила разобраны", handle.ruleEngine.describe().length === 2,
+      JSON.stringify(handle.ruleEngine.describe().map((d) => `${d.entityKey}→${d.targets.join("+")}:${d.actions.join("+")}`)));
+
+    // --- шаг 7: цвет лампы
+    const lightsBefore = lightsOf(card);
+    hass.states["light.test_lamp"] = ent("off", { friendly_name: "Тестовая лампа" });
+    card.hass = { ...hass };
+    await sleep(800);
+    const lampOff = objInfo(card, "Lamp_Gltf");
+    hass.states["light.test_lamp"] = ent("on", { friendly_name: "Тестовая лампа" });
+    card.hass = { ...hass };
+    await sleep(900);
+    const lampOn = objInfo(card, "Lamp_Gltf");
+    const lightsOn = lightsOf(card);
+    step("цвет меняется по состоянию", !!lampOff && !!lampOn && lampOff.color !== lampOn.color,
+      `off=${lampOff && lampOff.color} → on=${lampOn && lampOn.color}`);
+
+    // --- шаг 8: свет
+    const maxBefore = Math.max(...lightsBefore.map((l) => l.intensity), 0);
+    const maxOn = Math.max(...lightsOn.map((l) => l.intensity), 0);
+    step("свет включается", maxOn > maxBefore,
+      `интенсивность: ${JSON.stringify(lightsBefore.map((l) => l.intensity))} → ${JSON.stringify(lightsOn.map((l) => l.intensity))}; ` +
+      `источник в мире ${JSON.stringify(lightsOn.map((l) => l.world))}, центр лампы в мире ${JSON.stringify(lampOn && lampOn.world)}`);
+
+    // --- шаг 9: дверь
+    const doorClosed = objInfo(card, "Door_Gltf");
+    hass.states["binary_sensor.test_door"] = ent("on", { friendly_name: "Тестовая дверь", device_class: "door" });
+    card.hass = { ...hass };
+    await sleep(1500);
+    const doorOpen = objInfo(card, "Door_Gltf");
+    step("дверь поворачивается", delta(doorClosed, doorOpen) > 0.01,
+      `смещение/поворот ${delta(doorClosed, doorOpen).toFixed(3)}: позиция ${JSON.stringify(doorClosed && doorClosed.position)} → ${JSON.stringify(doorOpen && doorOpen.position)}, ` +
+      `в мире ${JSON.stringify(doorClosed && doorClosed.world)} → ${JSON.stringify(doorOpen && doorOpen.world)}, ` +
+      `кватернион ${JSON.stringify(doorClosed && doorClosed.quaternion)} → ${JSON.stringify(doorOpen && doorOpen.quaternion)}`);
+  }
+} catch (e) {
+  errors.push("исключение: " + (e && e.message));
+}
+
+await post();
+</script>
+</body>
+</html>

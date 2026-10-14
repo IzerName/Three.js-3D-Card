@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>threejs-3d-card — самопроверка рендеринга</title>
+<style>
+  :root {
+    --card-background-color: #151a22;
+    --primary-text-color: #e6edf5;
+    --secondary-text-color: #8b98a8;
+    --divider-color: rgba(130,150,180,.28);
+    --primary-color: #1f6feb;
+    --secondary-background-color: rgba(255,255,255,.06);
+    --color-2: #2f9df4;
+    --ha-card-border-radius: 14px;
+    --code-font-family: ui-monospace, Consolas, monospace;
+  }
+  body { margin: 0; background: #0b0e13; color: #e6edf5; font-family: system-ui, sans-serif; }
+  #stack { display: flex; flex-direction: column; gap: 12px; padding: 8px; }
+  /* Стенд: фиксируем размер, чтобы скриншот был детерминированным */
+  threejs-3d-card { display: block; width: 900px; }
+  #panel { padding: 8px 12px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: #8b98a8; }
+  #panel b { color: #e6edf5; }
+  .ok { color: #57d364; }
+  .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+<div id="stack"></div>
+<div id="panel">самопроверка выполняется…</div>
+
+<script type="module">
+// ============================================================================
+//  Страница самопроверки: строит карточки в разных режимах, измеряет результат
+//  и отправляет отчёт на локальный сервер (POST /__report).
+//
+//  Запуск headless-браузером:
+//    chrome --headless=new --enable-unsafe-swiftshader --screenshot=out.png \
+//           --window-size=980,1200 http://localhost:8099/dev/probe.html
+// ============================================================================
+
+const report = {
+  ok: false,
+  steps: [],
+  errors: [],
+  warnings: [],
+  images: {},
+  dom: {},
+};
+
+const log = (msg, cls = "") => {
+  const p = document.getElementById("panel");
+  p.innerHTML += `<br><span class="${cls}">${msg}</span>`;
+};
+const step = (name, ok, detail) => {
+  report.steps.push({ name, ok, detail });
+  log(`${ok ? "✔" : "✖"} ${name}${detail ? " — " + detail : ""}`, ok ? "ok" : "err");
+};
+
+window.addEventListener("error", (e) => report.errors.push(`window.error: ${e.message}`));
+window.addEventListener("unhandledrejection", (e) =>
+  report.errors.push(`unhandledrejection: ${(e.reason && e.reason.message) || e.reason}`));
+
+// перехват console.error/warn карточки
+const origError = console.error;
+const origWarn = console.warn;
+console.error = (...a) => {
+  const text = a.map((x) => (x && x.stack ? x.stack : String(x))).join(" ");
+  report.errors.push(text);
+  origError(...a);
+};
+console.warn = (...a) => { report.warnings.push(a.map(String).join(" ")); origWarn(...a); };
+
+// ---- демо-состояния Home Assistant -----------------------------------------
+const now = new Date().toISOString();
+const ent = (state, attributes) => ({ entity_id: "", state, attributes, last_changed: now, last_updated: now });
+
+const TANK = {
+  level: "sensor.water_level",
+  liters: "sensor.water_liters",
+  counter: "sensor.water_counter",
+  high: "binary_sensor.water_high",
+  medium: "binary_sensor.water_medium",
+  low: "binary_sensor.water_low",
+};
+
+const states = {
+  [TANK.level]: ent("62", { friendly_name: "Уровень чистой воды", unit_of_measurement: "%", state_class: "measurement" }),
+  [TANK.liters]: ent("124", { friendly_name: "Объём чистой воды", unit_of_measurement: "L" }),
+  [TANK.counter]: ent("345.7", { friendly_name: "Счётчик чистой воды", unit_of_measurement: "m³", state_class: "total_increasing" }),
+  [TANK.high]: ent("off", { friendly_name: "Датчик высокого уровня", device_class: "moisture" }),
+  [TANK.medium]: ent("on", { friendly_name: "Датчик среднего уровня", device_class: "moisture" }),
+  [TANK.low]: ent("off", { friendly_name: "Датчик низкого уровня", device_class: "moisture" }),
+  "switch.machine": ent("on", { friendly_name: "Станок" }),
+  "light.light_1": ent("on", { friendly_name: "Освещение 1", brightness: 180 }),
+  "sensor.water_total": ent("128.4", { friendly_name: "Счётчик воды", unit_of_measurement: "m³" }),
+};
+
+const services = [];
+const hass = {
+  states,
+  callService(domain, service, data) { services.push(`${domain}.${service} ${JSON.stringify(data || {})}`); },
+};
+
+// ---- измерение «нарисовалось ли» -------------------------------------------
+/**
+ * Считает долю непустых пикселей WebGL-канваса карточки.
+ * Для этого canvas переносится в offscreen-канвас: даже при
+ * preserveDrawingBuffer: false это работает сразу после кадра.
+ */
+function measureCanvas(cardEl) {
+  const root = cardEl.shadowRoot ? cardEl.shadowRoot.querySelector(".t3d-root") : cardEl;
+  if (!root) return { error: "нет .t3d-root" };
+  const canvas = root.querySelector("canvas");
+  if (!canvas) return { error: "нет canvas" };
+  const w = canvas.width, h = canvas.height;
+  if (!w || !h) return { error: `нулевой размер canvas: ${w}x${h}` };
+
+  // Рендерер создан с preserveDrawingBuffer: false, поэтому читать canvas нужно
+  // сразу после отрисовки кадра — иначе буфер уже очищен. Отрисовываем кадр
+  // синхронно (dt = 0, чтобы не сдвигать анимацию) и тут же копируем.
+  const engine = cardEl._engine;
+  if (engine && typeof engine._frame === "function") {
+    try { engine._frame(0); } catch (e) { report.warnings.push(`не удалось отрисовать кадр: ${e.message}`); }
+  }
+
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const g = off.getContext("2d");
+  g.drawImage(canvas, 0, 0);
+  const data = g.getImageData(0, 0, w, h).data;
+  const N = 60;                       // сколько точек берём по каждой оси
+  const stepX = Math.max(1, Math.floor(w / N));
+  const stepY = Math.max(1, Math.floor(h / N));
+  let total = 0, colored = 0;
+  const colors = new Set();
+  for (let y = 0; y < h; y += stepY) {
+    for (let x = 0; x < w; x += stepX) {
+      const i = (y * w + x) * 4;
+      const r = data[i], gg = data[i + 1], b = data[i + 2], a = data[i + 3];
+      total++;
+      if (a > 8 && (r > 12 || gg > 12 || b > 12)) colored++;
+      colors.add(`${r >> 4},${gg >> 4},${b >> 4}`);
+    }
+  }
+  return {
+    width: w, height: h,
+    sampled: total,
+    coloredRatio: +(colored / total).toFixed(3),
+    distinctColors: colors.size,
+    // первые пиксели — чтобы отличить «чёрный экран» от реальной картинки
+    probe: [data[0], data[1], data[2], data[3]],
+  };
+}
+
+/** Данные о WebGL-контексте: real GPU или программный SwiftShader. */
+function webglInfo(cardEl) {
+  const root = cardEl.shadowRoot ? cardEl.shadowRoot.querySelector(".t3d-root") : cardEl;
+  const canvas = root && root.querySelector("canvas");
+  const gl = canvas && (canvas.getContext("webgl2") || canvas.getContext("webgl"));
+  if (!gl) return { available: false };
+  const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    available: true,
+    vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+    renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+    contextLost: gl.isContextLost(),
+  };
+}
+
+const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Дождаться условия (инициализация сцены занимает разное время — особенно
+ * на программном WebGL). Возвращает true/false, а не бросает исключение.
+ */
+async function waitFor(label, cond, timeoutMs = 15000) {
+  const t0 = performance.now();
+  for (;;) {
+    let ok = false;
+    try { ok = !!cond(); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (performance.now() - t0 > timeoutMs) {
+      report.warnings.push(`таймаут ожидания: ${label} (${Math.round(timeoutMs)} мс)`);
+      return false;
+    }
+    await sleep(100);
+  }
+}
+
+/** Дождаться, пока карточка построит сцену нужной модели. */
+async function waitEngine(card, timeoutMs = 25000, expectId) {
+  const root = card.shadowRoot && card.shadowRoot.querySelector(".t3d-root");
+  const ok = await waitFor(
+    `сцена ${expectId || ""} построена`,
+    () => !!(card._engine && card._engine.model) && (!expectId || card._engine.model.manifest.id === expectId),
+    timeoutMs
+  );
+  if (!ok) {
+    const text = root ? (root.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200) : "(нет .t3d-root)";
+    const current = (card._engine && card._engine.model) ? card._engine.model.manifest.id : "нет движка";
+    report.errors.push(
+      `сцена не построена: ожидалась «${expectId}», сейчас «${current}»; текст карточки: «${text}»`
+    );
+  }
+  await raf();
+  return card._engine || null;
+}
+
+function makeCard(config, hassObj) {
+  const card = document.createElement("threejs-3d-card");
+  document.getElementById("stack").appendChild(card);
+  card.setConfig(config);
+  if (hassObj) card.hass = hassObj;
+  return card;
+}
+
+// ---- отправка отчёта -------------------------------------------------------
+let sent = false;
+async function sendReport(reason) {
+  if (sent) return;
+  sent = true;
+  report.finishedBy = reason;
+  log(`<b>Итог: ${report.ok ? "ВСЁ ХОРОШО" : "ЕСТЬ ПРОБЛЕМЫ"}</b> (${reason})`, report.ok ? "ok" : "err");
+  document.title = report.ok ? "PROBE-OK" : "PROBE-FAIL";
+  const body = JSON.stringify(report, null, 2);
+  try {
+    await fetch("/__report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  } catch (e) {
+    // Резерв: страницу могут закрыть сразу после снимка экрана.
+    try {
+      navigator.sendBeacon("/__report", new Blob([body], { type: "application/json" }));
+    } catch (e2) {
+      console.error("не удалось отправить отчёт", e, e2);
+    }
+  }
+  window.__probe = report;
+}
+
+// Страховка: отчёт уходит даже если сценарий где-то застрял.
+// Запас большой: под программным WebGL (SwiftShader) инициализация сцены
+// занимает секунды, а шагов в сценарии много.
+const watchdog = setTimeout(() => {
+  report.warnings.push("сработала страховка по времени: сценарий не завершился сам");
+  report.ok = false;
+  sendReport("watchdog");
+}, 240000);
+
+// ---- сценарий проверки ------------------------------------------------------
+(async () => {
+  try {
+    await import("/threejs-3d-card.js");
+
+    const api = window.ThreeJS3DCard;
+    step("карточка зарегистрирована", !!customElements.get("threejs-3d-card"));
+    step("редактор зарегистрирован", !!customElements.get("threejs-3d-card-editor"));
+    step("API опубликован (window.ThreeJS3DCard)", !!(api && api.defineModel && api.registry));
+
+    // 1. Бак
+    const tank = makeCard({
+      type: "custom:threejs-3d-card",
+      model: "water-tank",
+      title: "Бак чистой воды",
+      height: 400,
+      entities: {
+        level: TANK.level, liters: TANK.liters, counter: TANK.counter,
+        high: TANK.high, medium: TANK.medium, low: TANK.low,
+      },
+      params: { full_value: 100, max_liters: 200, level_color: "var(--color-2)" },
+    }, hass);
+
+    await waitEngine(tank, 25000, "water-tank");
+
+    const engine = tank._engine;
+    step("сцена бака создана", !!(engine && engine.model), engine && engine.model ? `модель: ${engine.model.manifest.id}` : "нет _engine");
+    if (engine) {
+      const diag = engine.diagnostics();
+      report.dom.tankBindings = diag.rows.map((r) => ({ key: r.key, entity: r.entity, level: r.level, message: r.message }));
+      const bad = diag.rows.filter((r) => r.level === "error");
+      step("привязки бака разрешены", bad.length === 0,
+        bad.length ? bad.map((b) => `${b.key}: ${b.message}`).join("; ") : `${diag.rows.length} ключей`);
+      step("three.js загружен", !!engine.THREE && !!engine.THREE.REVISION,
+        engine.THREE ? `r${engine.THREE.REVISION}` : "нет");
+      report.images.tank = measureCanvas(tank);
+      report.webgl = webglInfo(tank);
+      step("WebGL-контекст получен", !!(report.webgl && report.webgl.available),
+        report.webgl && report.webgl.renderer ? String(report.webgl.renderer).slice(0, 70) : "");
+      const img = report.images.tank;
+      step("бак нарисован (не пустой кадр)", !img.error && img.coloredRatio > 0.02 && img.distinctColors > 6,
+        img.error || `заполнено ${img.coloredRatio}, цветов ${img.distinctColors}`);
+
+      // уровень воды отражён в сцене (состояние живёт в движке модели)
+      const tankEngine = engine._modelHandle && engine._modelHandle.engine;
+      const lvl = engine.bindingView().level;
+      step("состояние level прочитано из hass",
+        !!lvl && lvl.entity === TANK.level && lvl.available === true && lvl.value === 62,
+        lvl ? `entity=${lvl.entity}, value=${lvl.value}, available=${lvl.available}` : "нет привязки");
+      step("уровень из hass дошёл до сцены бака",
+        !!tankEngine && tankEngine.levelValid === true && Math.abs(tankEngine.targetLevel - 0.62) < 0.01,
+        tankEngine ? `levelValid=${tankEngine.levelValid}, targetLevel=${tankEngine.targetLevel}` : "нет движка модели");
+
+      // 2. Модалка сущности
+      engine.openEntityModal(TANK.level, "level");
+      await raf();
+      const modalRoot = tank.shadowRoot.querySelector(".t3d-modal-backdrop");
+      const modalHtml = modalRoot ? modalRoot.innerHTML : "";
+      const modalVisible = !!modalRoot && modalRoot.style.display !== "none";
+      step("модалка сущности открывается", modalVisible && /Открыть в Home Assistant/.test(modalHtml));
+      step("в модалке есть атрибуты сущности", /Уровень чистой воды/.test(modalHtml) && /Состояние/.test(modalHtml));
+      report.dom.modalLength = modalHtml.length;
+
+      // кнопка «Открыть в HA» шлёт hass-more-info
+      let moreInfo = null;
+      tank.addEventListener("hass-more-info", (e) => { moreInfo = e.detail && e.detail.entityId; });
+      const openBtn = modalRoot.querySelector('[data-act="open"]');
+      if (openBtn) openBtn.click();
+      step("переход в HA работает", moreInfo === TANK.level, `hass-more-info: ${moreInfo}`);
+      engine.closeModal();
+
+      // 3. Смена модели на «цех»
+      tank.setConfig(Object.assign({}, tank.getConfig(), {
+        model: "production-room", title: "Цех", height: 400,
+        entities: { machine: "switch.machine", light1: "light.light_1", water: "sensor.water_total" },
+        reload_model: true,
+      }));
+      const engine2 = await waitEngine(tank, 25000, "production-room");
+      step("модель переключается без перезагрузки страницы",
+        !!(engine2 && engine2.model) && engine2.model.manifest.id === "production-room",
+        engine2 && engine2.model ? engine2.model.manifest.id : "нет сцены");
+      if (engine2) {
+        report.images.room = measureCanvas(tank);
+        const img2 = report.images.room;
+        step("цех нарисован", !img2.error && img2.coloredRatio > 0.02,
+          img2.error || `заполнено ${img2.coloredRatio}, цветов ${img2.distinctColors}`);
+      }
+
+      // 4. Внешняя модель по URL
+      tank.setConfig({
+        type: "custom:threejs-3d-card",
+        model: "/dev/probe-model.js",
+        model_url: "/dev/probe-model.js",
+        title: "Внешняя модель",
+        height: 300,
+        entities: { power: "switch.machine" },
+      });
+      const engine3 = await waitEngine(tank, 30000, "probe-external");
+      const externalOk = !!(engine3 && engine3.model) && engine3.model.manifest.id === "probe-external";
+      step("внешняя модель импортирована по URL", externalOk,
+        engine3 && engine3.model ? engine3.model.manifest.id : "сцена не создана");
+      if (externalOk) {
+        const bindings = engine3.bindingView();
+        step("привязки внешней модели работают",
+          bindings.power && bindings.power.entity === "switch.machine" && bindings.power.value === true,
+          JSON.stringify(bindings.power && { e: bindings.power.entity, v: bindings.power.value }));
+        report.images.external = measureCanvas(tank);
+        const img3 = report.images.external;
+        step("внешняя модель нарисована", !img3.error && img3.coloredRatio > 0.01,
+          img3.error || `заполнено ${img3.coloredRatio}, цветов ${img3.distinctColors}`);
+      }
+
+      // 5. Отсутствующая сущность не ломает карточку
+      tank.setConfig({
+        type: "custom:threejs-3d-card",
+        model: "water-tank",
+        height: 300,
+        entities: { level: "sensor.does_not_exist" },
+      });
+      const engine4 = await waitEngine(tank, 25000, "water-tank");
+      const state = engine4 && engine4.bindingView().level;
+      step("несуществующая сущность помечена, сцена жива",
+        !!engine4 && !!state && state.available === false && !!engine4.model,
+        state ? `available=${state.available}` : "нет данных");
+      report.dom.lastErrors = (engine4 && engine4.diagnostics().errors) || [];
+    }
+
+    // 6. Редактор
+    const editor = document.createElement("threejs-3d-card-editor");
+    document.getElementById("stack").appendChild(editor);
+    editor.hass = hass;
+    editor.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+    await sleep(700);
+    const edRoot = editor.shadowRoot || editor;
+    const html = edRoot.innerHTML;
+    step("редактор построил форму модели", /Устройства и параметры/.test(html),
+      `${html.length} символов разметки`);
+    step("в форме есть поле привязки «Уровень воды»", /Уровень воды/.test(html));
+    step("в форме есть параметры модели", /Значение, равное 100 %/.test(html) && /Цвет воды/.test(html));
+    // ha-entity-picker — компонент самого Home Assistant: вне HA его нет,
+    // и редактор осознанно переходит на текстовое поле с кнопкой «Список».
+    if (customElements.get("ha-entity-picker")) {
+      step("используется штатный ha-entity-picker",
+        /ha-entity-picker/.test(html) || !!edRoot.querySelector("ha-entity-picker"));
+    } else {
+      report.warnings.push("ha-entity-picker недоступен (стенд вне Home Assistant) — проверен резервный ввод");
+      step("резервный ввод сущностей работает", /entity_id|sensor\.|Уровень воды/.test(html));
+    }
+    report.dom.editorLength = html.length;
+    report.editorHtmlSample = html.slice(0, 1200);
+
+    report.ok = report.steps.every((s) => s.ok) && report.errors.length === 0;
+  } catch (e) {
+    report.errors.push(`исключение сценария: ${e && e.message ? e.message : e}`);
+    report.ok = false;
+  }
+
+  clearTimeout(watchdog);
+  await sendReport("сценарий завершён");
+})();
+</script>
+</body>
+</html>

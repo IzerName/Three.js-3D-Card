@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>threejs-3d-card — стенд разработки</title>
+<style>
+  :root {
+    --primary-background-color: 17, 20, 26;
+    --card-background-color: #151a22;
+    --secondary-background-color: rgba(255,255,255,.06);
+    --primary-text-color: #e6edf5;
+    --secondary-text-color: #8b98a8;
+    --divider-color: rgba(130,150,180,.28);
+    --primary-color: #1f6feb;
+    --success-color: #43a047;
+    --warning-color: #ffa600;
+    --error-color: #e53935;
+    --color-2: #2f9df4;
+    --ha-card-border-radius: 14px;
+    --code-font-family: ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: #0b0e13; color: var(--primary-text-color); display: flex; flex-direction: column;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; background: #11151c; border-bottom: 1px solid var(--divider-color);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header .brand { font-weight: 650; font-size: 14px; }
+  header .pill { font-size: 11.5px; padding: 4px 11px; border-radius: 20px;
+    border: 1px solid var(--divider-color); color: var(--secondary-text-color); }
+  header .pill.ok { color: #57d364; border-color: rgba(87,211,100,.4); }
+  header .pill.err { color: #ff7b72; border-color: rgba(255,123,114,.45); }
+  header button { cursor: pointer; font: inherit; font-size: 12px; padding: 6px 13px; border-radius: 9px;
+    border: 1px solid var(--divider-color); background: var(--secondary-background-color); color: inherit; }
+  header button:hover { filter: brightness(1.2); }
+  header button.active { background: var(--primary-color); border-color: var(--primary-color); color: #fff; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 340px; gap: 14px; padding: 14px 16px 24px; align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  #stage { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .card-shell { background: var(--card-background-color); border: 1px solid var(--divider-color);
+    border-radius: var(--ha-card-border-radius); overflow: hidden; }
+  /* В Lovelace размер задаёт сама карточка; на стенде фиксируем явно. */
+  threejs-3d-card { display: block; width: 100%; height: 420px; }
+  aside { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 62px; }
+  .panel { background: var(--card-background-color); border: 1px solid var(--divider-color);
+    border-radius: 14px; padding: 12px 14px; }
+  .panel h3 { margin: 0 0 10px; font-size: 12.5px; font-weight: 650; letter-spacing: .2px;
+    display: flex; justify-content: space-between; align-items: center; }
+  .row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 9px; }
+  .row label { font-size: 11px; color: var(--secondary-text-color); }
+  .row .val { font-family: var(--code-font-family); font-size: 11.5px; }
+  .row input[type=range] { width: 100%; accent-color: var(--primary-color); }
+  .row input[type=text], .row input[type=number], .row select {
+    font: inherit; font-size: 12px; padding: 6px 9px; border-radius: 8px; width: 100%;
+    background: var(--secondary-background-color); color: inherit; border: 1px solid var(--divider-color); }
+  .row input[type=text] { font-family: var(--code-font-family); font-size: 11.5px; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
+  .check input { accent-color: var(--primary-color); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .hint { font-size: 10.5px; color: var(--secondary-text-color); line-height: 1.5; }
+  .hint code { font-family: var(--code-font-family); background: var(--secondary-background-color);
+    padding: 1px 5px; border-radius: 4px; }
+  #log { font-family: var(--code-font-family); font-size: 10.5px; line-height: 1.55; max-height: 190px;
+    overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  #log div.ok { color: #57d364; }
+  #log div.err { color: #ff7b72; }
+  #log div.info { color: #79b8ff; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">🧊 threejs-3d-card · стенд</span>
+  <span class="pill" id="pill-model">модель: —</span>
+  <span class="pill" id="pill-three">three.js: —</span>
+  <span class="pill" id="pill-hass">hass: демо</span>
+  <button id="btn-config">Показать конфигурацию</button>
+  <button id="btn-stub">getStubConfig()</button>
+  <button id="btn-rebuild">Пересоздать карточку</button>
+</header>
+
+<main>
+  <div id="stage">
+    <div class="card-shell" id="shell">
+      <threejs-3d-card id="card"></threejs-3d-card>
+    </div>
+    <pre id="config-out" class="panel" style="display:none;margin:0;font-size:11px;overflow:auto"></pre>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h3>Модель и источники данных</h3>
+      <div class="row">
+        <label>Модель</label>
+        <select id="sel-model"></select>
+      </div>
+      <div class="row">
+        <label>Уровень воды, %</label>
+        <input type="range" id="in-level" min="0" max="100" value="62">
+        <span class="val" id="val-level">62 %</span>
+      </div>
+      <div class="row">
+        <label>Объём, л</label>
+        <input type="number" id="in-liters" value="124">
+      </div>
+      <div class="row">
+        <label>Счётчик, м³</label>
+        <input type="number" id="in-counter" value="345.7" step="0.1">
+      </div>
+      <div class="row">
+        <label>Датчики уровня</label>
+        <div class="check"><input type="checkbox" id="in-high"><span>высокий</span></div>
+        <div class="check"><input type="checkbox" id="in-medium" checked><span>средний</span></div>
+        <div class="check"><input type="checkbox" id="in-low"><span>низкий</span></div>
+      </div>
+      <div class="check"><input type="checkbox" id="in-unavail"><span>сделать уровень недоступным</span></div>
+      <div class="hint">Демо-состояния подставляются в <code>hass.states</code> ровно так же,
+        как это делает Home Assistant в реальном интерфейсе.</div>
+    </div>
+
+    <div class="panel">
+      <h3>Журнал</h3>
+      <div id="log"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Диагностика</h3>
+      <div class="check"><input type="checkbox" id="in-diag"><span>показывать панель в карточке</span></div>
+      <div id="diag-out" class="hint">—</div>
+    </div>
+  </aside>
+</main>
+
+<script type="module">
+import "/threejs-3d-card.js";
+
+const log = (msg, cls = "") => {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = `${new Date().toLocaleTimeString("ru-RU")}  ${msg}`;
+  const box = document.getElementById("log");
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+};
+window.addEventListener("error", (e) => log(`window.error: ${e.message}`, "err"));
+window.addEventListener("unhandledrejection", (e) => log(`unhandled: ${e.reason && e.reason.message || e.reason}`, "err"));
+
+const api = window.ThreeJS3DCard;
+const card = document.getElementById("card");
+const selModel = document.getElementById("sel-model");
+
+// ---- демо-состояния Home Assistant -----------------------------------------
+const ENTITIES = {
+  level: "sensor.water_preparation_level_clean_percentage",
+  liters: "sensor.water_preparation_level_clean_liters",
+  counter: "sensor.water_preparation_counter_clean_water",
+  high: "binary_sensor.water_preparation_clean_high_sensor",
+  medium: "binary_sensor.water_preparation_clean_medium_sensor",
+  low: "binary_sensor.water_preparation_clean_low_sensor",
+};
+
+function attr(name, extra = {}) {
+  return Object.assign({ friendly_name: name }, extra);
+}
+
+function buildStates() {
+  const level = Number(document.getElementById("in-level").value);
+  const liters = Number(document.getElementById("in-liters").value);
+  const counter = Number(document.getElementById("in-counter").value);
+  const unavailable = document.getElementById("in-unavail").checked;
+  const bin = (id) => (document.getElementById(id).checked ? "on" : "off");
+  const now = new Date().toISOString();
+
+  const states = {
+    [ENTITIES.level]: {
+      entity_id: ENTITIES.level,
+      state: unavailable ? "unavailable" : String(level),
+      attributes: attr("Уровень чистой воды", { unit_of_measurement: "%", state_class: "measurement" }),
+      last_changed: now, last_updated: now,
+    },
+    [ENTITIES.liters]: {
+      entity_id: ENTITIES.liters,
+      state: String(liters),
+      attributes: attr("Объём чистой воды", { unit_of_measurement: "L", state_class: "measurement" }),
+      last_changed: now, last_updated: now,
+    },
+    [ENTITIES.counter]: {
+      entity_id: ENTITIES.counter,
+      state: String(counter),
+      attributes: attr("Счётчик чистой воды", { unit_of_measurement: "m³", state_class: "total_increasing" }),
+      last_changed: now, last_updated: now,
+    },
+    [ENTITIES.high]: {
+      entity_id: ENTITIES.high, state: bin("in-high"),
+      attributes: attr("Датчик высокого уровня", { device_class: "moisture" }),
+      last_changed: now, last_updated: now,
+    },
+    [ENTITIES.medium]: {
+      entity_id: ENTITIES.medium, state: bin("in-medium"),
+      attributes: attr("Датчик среднего уровня", { device_class: "moisture" }),
+      last_changed: now, last_updated: now,
+    },
+    [ENTITIES.low]: {
+      entity_id: ENTITIES.low, state: bin("in-low"),
+      attributes: attr("Датчик низкого уровня", { device_class: "moisture" }),
+      last_changed: now, last_updated: now,
+    },
+  };
+
+  // Демо-сущности для модели «производственное помещение»
+  states["switch.machine"] = { entity_id: "switch.machine", state: "on", attributes: attr("Станок"), last_changed: now, last_updated: now };
+  states["light.light_1"] = { entity_id: "light.light_1", state: "on", attributes: attr("Освещение 1", { brightness: 180 }), last_changed: now, last_updated: now };
+  states["sensor.water_total"] = { entity_id: "sensor.water_total", state: "128.4", attributes: attr("Счётчик воды", { unit_of_measurement: "m³" }), last_changed: now, last_updated: now };
+  return states;
+}
+
+let hass = {
+  states: buildStates(),
+  callService(domain, service, data) {
+    log(`callService → ${domain}.${service} ${JSON.stringify(data || {})}`, "info");
+  },
+  formatEntityState: (st) => st.state,
+};
+
+// ---- конфигурация карточки --------------------------------------------------
+const candidates = [
+  ENTITIES.level, ENTITIES.liters, ENTITIES.counter,
+  ENTITIES.high, ENTITIES.medium, ENTITIES.low,
+];
+
+let config = {
+  type: "custom:threejs-3d-card",
+  model: new URLSearchParams(location.search).get("model") || "water-tank",
+  title: "Бак чистой воды · стенд",
+  height: 420,
+  entities: {
+    level: ENTITIES.level,
+    liters: ENTITIES.liters,
+    counter: ENTITIES.counter,
+    high: ENTITIES.high,
+    medium: ENTITIES.medium,
+    low: ENTITIES.low,
+  },
+  params: { full_value: 100, max_liters: 200, level_color: "var(--color-2)" },
+};
+
+function mount() {
+  card.setConfig(config);
+  card.hass = hass;
+  const m = api && api.models ? api.models() : [];
+  document.getElementById("pill-model").textContent = `модель: ${config.model}`;
+  log(`карточка смонтирована: model=${config.model}`, "ok");
+  const loaded = m.find((x) => x.id === config.model);
+  document.getElementById("diag-out").innerHTML = loaded
+    ? `Модель: <b>${loaded.name}</b><br>id: <code>${loaded.id}</code><br>bindings: ${(loaded.bindings || []).length}`
+    : "Модель загружается…";
+}
+
+function refresh() {
+  hass = Object.assign({}, hass, { states: buildStates() });
+  card.hass = hass;
+}
+
+// ---- элементы управления ----------------------------------------------------
+document.getElementById("in-level").addEventListener("input", (e) => {
+  document.getElementById("val-level").textContent = `${e.target.value} %`;
+  refresh();
+});
+["in-liters", "in-counter"].forEach((id) =>
+  document.getElementById(id).addEventListener("input", refresh));
+["in-high", "in-medium", "in-low", "in-unavail"].forEach((id) =>
+  document.getElementById(id).addEventListener("change", refresh));
+
+document.getElementById("in-diag").addEventListener("change", (e) => {
+  config = Object.assign({}, config, { show_diagnostics: e.target.checked });
+  card.setConfig(config);
+});
+
+document.getElementById("btn-rebuild").addEventListener("click", () => {
+  log("пересоздание карточки…", "info");
+  const fresh = document.createElement("threejs-3d-card");
+  fresh.id = "card";
+  card.replaceWith(fresh);
+  location.reload();
+});
+
+document.getElementById("btn-config").addEventListener("click", () => {
+  const out = document.getElementById("config-out");
+  out.style.display = out.style.display === "none" ? "block" : "none";
+  out.textContent = JSON.stringify(config, null, 2);
+});
+
+document.getElementById("btn-stub").addEventListener("click", () => {
+  const classRef = customElements.get("threejs-3d-card");
+  const stub = classRef.getStubConfig(hass, candidates);
+  log(`getStubConfig() → ${JSON.stringify(stub)}`, "info");
+  const out = document.getElementById("config-out");
+  out.style.display = "block";
+  out.textContent = JSON.stringify(stub, null, 2);
+});
+
+// Наполнение списка моделей
+if (api && api.models) {
+  const fill = () => {
+    const list = api.models();
+    selModel.innerHTML = "";
+    for (const m of list) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = `${m.name} (${m.id})`;
+      if (m.id === config.model) o.selected = true;
+      selModel.appendChild(o);
+    }
+  };
+  fill();
+  selModel.addEventListener("change", () => {
+    config = Object.assign({}, config, { model: selModel.value, reload_model: true });
+    mount();
+  });
+
+  // Отдельный URL внешней модели: ?url=/local/3d-models/my-model.js
+  const urlParam = new URLSearchParams(location.search).get("url");
+  if (urlParam) {
+    config = Object.assign({}, config, { model: urlParam, model_url: urlParam, reload_model: true });
+  }
+  log(`доступные модели: ${api.models().map((m) => m.id).join(", ") || "нет"}`, "ok");
+}
+
+// Признак загрузки three.js: панель показывает, что локальный vendor нашёлся
+import("/vendor/three.module.js")
+  .then((m) => {
+    const rev = m.REVISION || (m.default && m.default.REVISION) || "?";
+    document.getElementById("pill-three").textContent = `three.js: r${rev} (локально)`;
+    document.getElementById("pill-three").classList.add("ok");
+    log(`three.js r${rev} загружен из vendor/`, "ok");
+  })
+  .catch((e) => {
+    document.getElementById("pill-three").textContent = "three.js: ошибка";
+    document.getElementById("pill-three").classList.add("err");
+    log(`three.js не загрузился: ${e.message}`, "err");
+  });
+
+mount();
+log("стенд готов", "ok");
+</script>
+</body>
+</html>

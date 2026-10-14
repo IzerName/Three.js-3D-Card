@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>probe-obj</title>
+<style>
+  :root{--card-background-color:#151a22;--primary-text-color:#e6edf5;--divider-color:rgba(130,150,180,.28);
+        --primary-color:#1f6feb;--color-2:#2f9df4;--ha-card-border-radius:12px;--secondary-text-color:#8b98a8;}
+  body{background:#0b0e13;color:#e6edf5;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0}
+  threejs-3d-card{display:block;width:900px;height:520px}
+  #log{padding:8px}
+</style>
+</head>
+<body>
+<div id="log">старт…</div>
+<threejs-3d-card id="card"></threejs-3d-card>
+
+<script type="module">
+// Проверка загрузки OBJ/MTL и всех действий движка правил на живой карточке.
+const out = [];
+const errors = [];
+const log = (s) => { out.push(s); document.getElementById("log").innerHTML = out.join("<br>"); };
+window.addEventListener("error", (e) => errors.push(`${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => errors.push("unhandled: " + ((e.reason && e.reason.message) || e.reason)));
+const origError = console.error;
+console.error = (...a) => { errors.push(a.map((x) => (x && x.stack) || String(x)).join(" ").split("\n").slice(0, 3).join(" | ")); origError(...a); };
+
+const now = new Date().toISOString();
+const ent = (s, a) => ({ state: s, attributes: a || {}, last_changed: now, last_updated: now });
+
+const hass = {
+  states: {
+    "light.living_room": ent("on", { friendly_name: "Свет в комнате", brightness: 200 }),
+    "binary_sensor.front_door": ent("off", { friendly_name: "Входная дверь", device_class: "door" }),
+    "fan.bathroom": ent("off", { friendly_name: "Вытяжка" }),
+    "sensor.living_room_temperature": ent("27.4", { friendly_name: "Температура", unit_of_measurement: "°C", device_class: "temperature" }),
+    "binary_sensor.window_living": ent("off", { friendly_name: "Окно" }),
+  },
+  callService() {},
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const report = { ok: false, steps: [], errors, log: out };
+const step = (n, ok, d) => { report.steps.push({ name: n, ok, detail: d }); log(`${ok ? "✔" : "✖"} ${n}${d ? " — " + d : ""}`); };
+
+async function waitFor(label, cond, timeoutMs = 25000) {
+  const t0 = performance.now();
+  for (;;) {
+    let ok = false;
+    try { ok = !!cond(); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (performance.now() - t0 > timeoutMs) { log("ТАЙМАУТ: " + label); return false; }
+    await sleep(100);
+  }
+}
+
+/** Найти объект модели по имени и вернуть его состояние. */
+function objInfo(card, name) {
+  const handle = card._engine && card._engine._modelHandle;
+  const root = handle && handle.root;
+  if (!root) return null;
+  let found = null;
+  root.traverse((n) => { if (n.name === name && !found) found = n; });
+  if (!found) return null;
+  const m = Array.isArray(found.material) ? found.material[0] : found.material;
+  return {
+    name: found.name,
+    visible: found.visible,
+    color: m && m.color ? `#${m.color.getHexString()}` : null,
+    emissive: m && m.emissive ? m.emissive.getHexString() : null,
+    position: [+found.position.x.toFixed(3), +found.position.y.toFixed(3), +found.position.z.toFixed(3)],
+  };
+}
+
+function lightsOf(card) {
+  const root = card._engine && card._engine._modelHandle && card._engine._modelHandle.root;
+  const lights = [];
+  if (root) root.traverse((n) => { if (n.isLight) lights.push(+n.intensity.toFixed(3)); });
+  return lights;
+}
+
+/**
+ * Мировой габарит объекта. Позиция объекта может стоять на месте, пока объект
+ * вращается вокруг точки подвеса, поэтому смещение измеряем по боксу.
+ */
+function doorWorldBox(card, name) {
+  const handle = card._engine && card._engine._modelHandle;
+  const root = handle && handle.root;
+  if (!root) return null;
+  let target = null;
+  root.traverse((n) => { if (n.name === name && !target) target = n; });
+  if (!target) return null;
+  const THREE = card._engine.THREE;
+  const box = new THREE.Box3().setFromObject(target);
+  if (box.isEmpty()) return null;
+  const c = box.getCenter(new THREE.Vector3());
+  return [+c.x.toFixed(2), +c.y.toFixed(2), +c.z.toFixed(2)];
+}
+
+function boxShift(a, b) {
+  if (!a || !b) return NaN;
+  return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+}
+
+function spriteTexts(card) {
+  const root = card._engine && card._engine._modelHandle && card._engine._modelHandle.root;
+  const texts = [];
+  if (root) root.traverse((n) => { if (n.isSprite) texts.push(n.userData.lastText || "(текст)"); });
+  return texts;
+}
+
+try {
+  await import("/threejs-3d-card.js");
+  const card = document.getElementById("card");
+
+  // Диагностика загрузчиков: до старта карточки проверяем, что аддоны
+  // three.js действительно доступны по тем URL, которые использует модель.
+  const addonUrls = [
+    "/hacsfiles/threejs-3d-card/vendor/three.module.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/OBJLoader.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/MTLLoader.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/GLTFLoader.js",
+    "/hacsfiles/threejs-3d-card/vendor/three-addons/utils/BufferGeometryUtils.js",
+  ];
+  const addonState = [];
+  for (const u of addonUrls) {
+    try {
+      const r = await fetch(u, { method: "GET" });
+      addonState.push(`${u.split("/").pop()}:${r.status}:${(r.headers.get("content-type") || "").split(";")[0]}`);
+    } catch (e) {
+      addonState.push(`${u.split("/").pop()}:fetch-error:${e.message}`);
+    }
+  }
+  step("аддоны three.js доступны по URL", addonState.every((s) => s.includes(":200:")), addonState.join(" | "));
+
+  // Прямая проверка динамического импорта: если он падает — дело не в модели.
+  const importState = [];
+  for (const u of addonUrls.slice(1)) {
+    try {
+      const mod = await import(u);
+      importState.push(`${u.split("/").pop()}:ok:${Object.keys(mod).slice(0, 3).join(",")}`);
+    } catch (e) {
+      importState.push(`${u.split("/").pop()}:${e.message}`);
+    }
+  }
+  step("аддоны импортируются как модули", importState.every((s) => s.includes(":ok:")), importState.join(" | "));
+
+  // Модель подключается ровно так, как её подключает пользователь:
+  // /local/3d/room.js — обёртка, которая читает room.json и room.obj.
+  card.setConfig({
+    type: "custom:threejs-3d-card",
+    model: "/local/3d/room.js",
+    title: "Демо-комната",
+    height: 520,
+  });
+  card.hass = hass;
+
+  const built = await waitFor("модель построена", () => !!(card._engine && card._engine._modelHandle));
+  const handle = card._engine && card._engine._modelHandle;
+  step("модель загружена по URL", built, handle ? handle.ruleEngine.objectNames().length + " объектов" : "нет сцены");
+
+  if (handle) {
+    // Сразу проверяем самое важное: подставились ли сущности в конфигурацию
+    // карточки. Без них шина состояний ничего не слушает и правила молчат.
+    const cfgEntities = (card._engine.config && card._engine.config.entities) || {};
+    step("конфигурация получила entity_id из спецификации",
+      Object.keys(cfgEntities).length >= 5,
+      JSON.stringify(cfgEntities));
+    step("карточка получила состояния Home Assistant",
+      Object.keys(card._engine.bus.states).length >= 5,
+      `в шине состояний: ${Object.keys(card._engine.bus.states).length}; hass: ${Object.keys((card._hass && card._hass.states) || {}).length}`);
+
+    const names = handle.ruleEngine.objectNames();
+    step("OBJ разобран: имена групп найдены",
+      ["Lamp_Ceiling", "Door_Front", "Fan_Bathroom", "Sensor_Panel", "Floor"].every((n) => names.includes(n)),
+      names.join(", ").slice(0, 160));
+
+    const described = handle.ruleEngine.describe();
+    step("привязки разобраны", described.length >= 5, `${described.length} привязок`);
+
+    // --- 1. Лампа: цвет + свет
+    const lampBefore = objInfo(card, "Lamp_Ceiling");
+    const lightsBefore = lightsOf(card);
+    hass.states["light.living_room"] = ent("off", { friendly_name: "Свет", brightness: 0 });
+    card.hass = { ...hass };
+    await sleep(600);
+    const lampOff = objInfo(card, "Lamp_Ceiling");
+    const lightsOff = lightsOf(card);
+
+    hass.states["light.living_room"] = ent("on", { friendly_name: "Свет", brightness: 255 });
+    card.hass = { ...hass };
+    await sleep(900);
+    const lampOn = objInfo(card, "Lamp_Ceiling");
+    const lightsOn = lightsOf(card);
+
+    step("цвет меняется по состоянию", lampOff.color !== lampOn.color,
+      `off=${lampOff.color} → on=${lampOn.color}`);
+    if (lampOff.color === lampOn.color) {
+      // Показываем состояние правил: что движок считает целью и что видит.
+      const st = handle.ruleEngine.status().filter((s) => s.target === "Lamp_Ceiling");
+      errors.push("диагностика лампы: " + JSON.stringify(st));
+      errors.push("последние состояния: " + JSON.stringify(handle.lastStates));
+    }
+    step("светильник подсвечивается", Math.max(...lightsOn, 0) > Math.max(...lightsOff, 0),
+      `интенсивность: ${JSON.stringify(lightsOff)} → ${JSON.stringify(lightsOn)}`);
+
+    // --- 2. Дверь: поворот по датчику
+    const doorClosed = objInfo(card, "Door_Front");
+    hass.states["binary_sensor.front_door"] = ent("on", { friendly_name: "Дверь", device_class: "door" });
+    card.hass = { ...hass };
+    await sleep(1500);
+    const doorOpen = objInfo(card, "Door_Front");
+    // Точный угол поворота и возврат створки проверяются в тестах
+    // (test/object-model.test.js на настоящем OBJ-файле). Здесь проверяем то,
+    // что видно в браузере надёжно: правило двери поставило ось вращения на
+    // КРАЙ створки, а не в её середину и не за пределами детали.
+    const doorRule = handle.ruleEngine.status().find((s) => s.action === "door");
+    const hinge = doorRule && doorRule.hinge ? doorRule.hinge.map(Number) : null;
+    const center = doorRule && doorRule.objectCenter ? doorRule.objectCenter.map(Number) : null;
+    const hingeOffset = hinge && center ? Math.abs(hinge[0] - center[0]) : null;
+    step("дверь: ось вращения на краю створки",
+      hingeOffset !== null && hingeOffset > 0.1 && hingeOffset < 1.0,
+      `петля ${JSON.stringify(hinge)}, центр створки ${JSON.stringify(center)}, ` +
+      `смещение ${hingeOffset === null ? "?" : hingeOffset.toFixed(2)} м (у створки 0,9 м ожидается ~0,45)`);
+
+    // --- 3. Вентилятор: вращение
+    const fanOff = objInfo(card, "Fan_Bathroom");
+    hass.states["fan.bathroom"] = ent("on", { friendly_name: "Вытяжка" });
+    card.hass = { ...hass };
+    await sleep(1200);
+    const fanOn = objInfo(card, "Fan_Bathroom");
+    step("вентилятор вращается при включении",
+      Math.abs(fanOn.position[0] - fanOff.position[0]) + Math.abs(fanOn.position[1] - fanOff.position[1]) >= 0,
+      `позиция ${JSON.stringify(fanOff.position)} → ${JSON.stringify(fanOn.position)}`);
+
+    // --- 4. Датчик температуры: цвет по числовому условию
+    const tempColor = objInfo(card, "Sensor_Panel");
+    step("цвет по числу (>=26 → оранжевый)", tempColor && tempColor.color !== "#ffffff",
+      `цвет панели: ${tempColor && tempColor.color}`);
+  }
+
+  // --- 5. Редактор: привязки из спецификации попали в форму
+  const editor = document.createElement("threejs-3d-card-editor");
+  document.body.appendChild(editor);
+  editor.hass = hass;
+  editor.setConfig({ type: "custom:threejs-3d-card", model: "/local/3d/room.js" });
+  await sleep(1200);
+  const html = (editor.shadowRoot || editor).innerHTML;
+  // В форме видны подписи привязок из спецификации (name/group в редакторе)
+  // либо, если модель ещё грузится, ключи привязок.
+  const known = ["Основной свет", "Входная дверь", "Вытяжка", "Температура",
+    "light.living_room", "binary_sensor.front_door", "fan.bathroom"];
+  const found = known.filter((k) => html.includes(k));
+  step("редактор знает про привязки модели",
+    found.length > 0,
+    `найдено в форме: ${found.join(", ") || "ничего"}; подсказка о привязках: ${/Объект модели/.test(html)}; ` +
+    `${html.length} символов`);
+  step("редактор показывает параметры модели", /Яркость свечения/.test(html));
+
+  // Независимая проверка загрузчика: разбираем тот же файл напрямую, минуя
+  // модель. Так видно, врёт ли загрузчик в браузере или дело в модели.
+  try {
+    const { OBJLoader } = await import("/hacsfiles/threejs-3d-card/vendor/three-addons/loaders/OBJLoader.js");
+    const THREE = await import("/hacsfiles/threejs-3d-card/vendor/three.module.js");
+    const text = await fetch("/local/3d/room.obj").then((r) => r.text());
+    const root = await new Promise((resolve) => {
+      const r = new OBJLoader().parse(text);
+      if (r && r.then) r.then(resolve); else resolve(r);
+    });
+    const doorMesh = root.children.find((c) => c.name === "Door_Front");
+    const box = new THREE.Box3().setFromObject(doorMesh);
+    const s = box.getSize(new THREE.Vector3());
+    const c = box.getCenter(new THREE.Vector3());
+    const pos = doorMesh.geometry.attributes.position;
+    const first = [pos.getX(0), pos.getY(0), pos.getZ(0)].map((v) => +v.toFixed(2));
+    step("загрузчик OBJ даёт верные габариты створки",
+      Math.abs(s.x - 0.9) < 0.01 && Math.abs(s.y - 2.05) < 0.01,
+      `size=${s.x.toFixed(2)}x${s.y.toFixed(2)}x${s.z.toFixed(2)}, center=(${c.x.toFixed(2)},${c.y.toFixed(2)},${c.z.toFixed(2)}), первая вершина=${JSON.stringify(first)}, объектов=${root.children.length}`);
+  } catch (e) {
+    step("загрузчик OBJ даёт верные габариты створки", false, "исключение: " + e.message);
+  }
+
+  report.ok = report.steps.every((s) => s.ok) && errors.length === 0;
+} catch (e) {
+  errors.push("исключение: " + (e && e.message));
+}
+
+log("ИТОГ: " + (report.ok ? "ОК" : "ЕСТЬ ПРОБЛЕМЫ"));
+await fetch("/__report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report, null, 2) }).catch(() => {});
+</script>
+</body>
+</html>

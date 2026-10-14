@@ -1,0 +1,18 @@
+# Зависимости и кэш
+node_modules/
+.npm-cache/
+package-lock.json
+
+# ВАЖНО: dist/ НЕ игнорируется и коммитится намеренно.
+# HACS ставит Dashboard-плагин из архива репозитория на теге. Файл из hacs.json
+# (filename) он ищет сначала в корне, а если его там нет — в dist/, и тогда
+# забирает содержимое dist/ целиком (это единственный поддерживаемый способ
+# установить многофайловый плагин: ядро + модели + three.js).
+# Перед релизом: npm run build && git add dist && git commit.
+# Целостность проверяется тестом test/publish.test.js и CI (release.yml).
+
+# Служебное
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

@@ -1,0 +1,69 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "аддоны доступны",
+      "ok": true,
+      "detail": "three.module.js:200:text/javascript | GLTFLoader.js:200:text/javascript | BufferGeometryUtils.js:200:text/javascript"
+    },
+    {
+      "name": "GLTFLoader импортируется",
+      "ok": true,
+      "detail": "GLTFLoader загружен, экспортов: 1"
+    },
+    {
+      "name": ".gltf и внешний .bin собраны",
+      "ok": true,
+      "detail": "JSON 1086 симв., буфер 648 Б по ссылке blob:http://127.0.0.1:8099/7…, узлы [Lamp_Gltf, Door_Gltf]"
+    },
+    {
+      "name": "сцена построена",
+      "ok": true,
+      "detail": "7 объектов, меши [Lamp_Gltf:24, Door_Gltf:24]; рендерер карточки: есть, внешний хост: нет, модель рисует сама: нет, вызовов отрисовки WebGL: 4"
+    },
+    {
+      "name": "внешний буфер загружен",
+      "ok": true,
+      "detail": "запросов за .gltf: 1, за .bin: 1; всего blob-запросов 2; геометрия [Lamp_Gltf:24, Door_Gltf:24] (ожидается 24 вершины)"
+    },
+    {
+      "name": "имена объектов найдены",
+      "ok": true,
+      "detail": "probe-gltf, ProbeScene, probescene, Lamp_Gltf, lamp_gltf, Door_Gltf, door_gltf"
+    },
+    {
+      "name": "правила разобраны",
+      "ok": true,
+      "detail": "[\"light.test_lamp→Lamp_Gltf+Lamp_Gltf:color+light\",\"binary_sensor.test_door→Door_Gltf:door\"]"
+    },
+    {
+      "name": "цвет меняется по состоянию",
+      "ok": true,
+      "detail": "off=#3d3d3d → on=#ffd9a0"
+    },
+    {
+      "name": "свет включается",
+      "ok": true,
+      "detail": "интенсивность: [0] → [0.797]; источник в мире [[-1.1,1.5,-1]], центр лампы в мире [-1.1,1.5,-1]"
+    },
+    {
+      "name": "дверь поворачивается",
+      "ok": true,
+      "detail": "смещение/поворот 0.805: позиция [0.9,0.9,1.4] → [0.9,0.9,1.4], в мире [0.9,0.2,1] → [0.9,0.2,1], кватернион [0,0,0,1] → [0,0.7372,0,0.6757]"
+    }
+  ],
+  "errors": [],
+  "log": [
+    "✔ аддоны доступны — three.module.js:200:text/javascript | GLTFLoader.js:200:text/javascript | BufferGeometryUtils.js:200:text/javascript",
+    "✔ GLTFLoader импортируется — GLTFLoader загружен, экспортов: 1",
+    "✔ .gltf и внешний .bin собраны — JSON 1086 симв., буфер 648 Б по ссылке blob:http://127.0.0.1:8099/7…, узлы [Lamp_Gltf, Door_Gltf]",
+    "✔ сцена построена — 7 объектов, меши [Lamp_Gltf:24, Door_Gltf:24]; рендерер карточки: есть, внешний хост: нет, модель рисует сама: нет, вызовов отрисовки WebGL: 4",
+    "✔ внешний буфер загружен — запросов за .gltf: 1, за .bin: 1; всего blob-запросов 2; геометрия [Lamp_Gltf:24, Door_Gltf:24] (ожидается 24 вершины)",
+    "✔ имена объектов найдены — probe-gltf, ProbeScene, probescene, Lamp_Gltf, lamp_gltf, Door_Gltf, door_gltf",
+    "✔ правила разобраны — [\"light.test_lamp→Lamp_Gltf+Lamp_Gltf:color+light\",\"binary_sensor.test_door→Door_Gltf:door\"]",
+    "✔ цвет меняется по состоянию — off=#3d3d3d → on=#ffd9a0",
+    "✔ свет включается — интенсивность: [0] → [0.797]; источник в мире [[-1.1,1.5,-1]], центр лампы в мире [-1.1,1.5,-1]",
+    "✔ дверь поворачивается — смещение/поворот 0.805: позиция [0.9,0.9,1.4] → [0.9,0.9,1.4], в мире [0.9,0.2,1] → [0.9,0.2,1], кватернион [0,0,0,1] → [0,0.7372,0,0.6757]",
+    "ИТОГ: ОК"
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "manifest": {
+    "id": "demo-room",
+    "name": "Демо-комната",
+    "description": "Пример модели: лампа, дверь, вентилятор, датчик температуры",
+    "environment": { "floor": "radial", "shadows": true },
+    "camera": { "target": [0, 1.2, 0], "radius": 9, "phi": 1.05, "theta": 0.7 },
+    "size": { "defaultHeight": 560 }
+  },
+
+  "source": {
+    "format": "obj",
+    "url": "/local/3d/room.obj",
+    "mtl": "/local/3d/room.mtl"
+  },
+
+  "groups": {
+    "lamps": ["Lamp_Ceiling"]
+  },
+
+  "bindings": [
+    {
+      "entity": "light.living_room",
+      "target": "Lamp_Ceiling",
+      "name": "Основной свет",
+      "group": "Освещение",
+      "colors": { "on": "#ffd9a0", "off": "#3a3a3a" },
+      "light": { "lumens": 900, "color": "#ffd9a0", "distance": 12, "castShadow": true }
+    },
+    {
+      "entity": "binary_sensor.front_door",
+      "target": "Door_Front",
+      "name": "Входная дверь",
+      "group": "Двери и окна",
+      "door": { "hinge": "left", "degrees": 95, "axis": "y", "open": ["on", "open"] }
+    },
+    {
+      "entity": "fan.bathroom",
+      "target": "Fan_Bathroom",
+      "name": "Вытяжка в санузле",
+      "group": "Климат",
+      "rotate": { "axis": "z", "round_per_second": 3, "on": ["on"] }
+    },
+    {
+      "entity": "sensor.living_room_temperature",
+      "target": "Sensor_Panel",
+      "name": "Температура",
+      "group": "Климат",
+      "colors": { "<18": "#3aa0ff", ">=18": "#3ad07a", ">=26": "#ff8c00", ">=30": "#e53935" }
+    },
+    {
+      "entity": "sensor.living_room_temperature",
+      "target": "Label_Temp",
+      "name": "Подпись температуры",
+      "group": "Климат",
+      "text": { "template": "{value} {unit}", "digits": 1, "scale": 0.004, "elevation": 0.25 }
+    },
+    {
+      "entity": "binary_sensor.window_living",
+      "target": "Floor",
+      "name": "Проветривание (пример сдвига)",
+      "group": "Двери и окна",
+      "actions": [
+        { "action": "door", "slide": true, "axis": "x", "span": 0.6, "open": ["on"], "rate": 4 }
+      ]
+    }
+  ],
+
+  "entityConfig": {
+    "light.living_room": { "name": "Свет в комнате", "kind": "brightness", "hint": "Учитывается яркость" },
+    "binary_sensor.front_door": { "name": "Датчик входной двери", "kind": "boolean" },
+    "fan.bathroom": { "name": "Вентилятор", "kind": "boolean" },
+    "sensor.living_room_temperature": { "name": "Температура, °C", "kind": "number" },
+    "binary_sensor.window_living": { "name": "Окно открыто", "kind": "boolean" }
+  },
+
+  "params": [
+    {
+      "key": "glow",
+      "name": "Яркость свечения лампы",
+      "type": "range",
+      "default": 0.7,
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "description": "Используется, если модель расширена кодом"
+    }
+  ]
+}

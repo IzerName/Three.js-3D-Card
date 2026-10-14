@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>probe-ext</title>
+<style>
+  :root{--card-background-color:#151a22;--primary-text-color:#e6edf5;--divider-color:rgba(130,150,180,.28);
+        --primary-color:#1f6feb;--color-2:#2f9df4;--ha-card-border-radius:12px;--secondary-text-color:#8b98a8;}
+  body{background:#0b0e13;color:#e6edf5;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0}
+  threejs-3d-card{display:block;width:900px;height:340px}
+  #log{padding:8px}
+</style>
+</head>
+<body>
+<div id="log">старт…</div>
+<threejs-3d-card id="card"></threejs-3d-card>
+
+<script type="module">
+// Точечная проверка: карточка грузит ВНЕШНЮЮ модель по URL и рисует её.
+const out = [];
+const errors = [];
+const log = (s) => { out.push(s); document.getElementById("log").innerHTML = out.join("<br>"); };
+window.addEventListener("error", (e) => errors.push(`${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => errors.push(`unhandled: ${(e.reason && e.reason.message) || e.reason}`));
+const origError = console.error;
+console.error = (...a) => { errors.push(a.map((x) => (x && x.stack) || String(x)).join(" ")); origError(...a); };
+
+const now = new Date().toISOString();
+const hass = {
+  states: {
+    "switch.machine": { state: "on", attributes: { friendly_name: "Станок" }, last_changed: now, last_updated: now },
+  },
+  callService() {},
+};
+
+const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(label, cond, timeoutMs = 20000) {
+  const t0 = performance.now();
+  for (;;) {
+    let ok = false;
+    try { ok = !!cond(); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (performance.now() - t0 > timeoutMs) { log(`ТАЙМАУТ: ${label}`); return false; }
+    await sleep(100);
+  }
+}
+
+const report = { ok: false, log: out, errors, steps: [] };
+const step = (name, ok, detail) => { report.steps.push({ name, ok, detail }); log(`${ok ? "✔" : "✖"} ${name}${detail ? " — " + detail : ""}`); };
+
+try {
+  await import("/threejs-3d-card.js");
+  const card = document.getElementById("card");
+
+  const cfg = {
+    type: "custom:threejs-3d-card",
+    model: "/dev/probe-model.js",
+    model_url: "/dev/probe-model.js",
+    title: "Внешняя модель",
+    height: 340,
+    entities: { power: "switch.machine" },
+    params: { color: "var(--color-2)" },
+  };
+  card.setConfig(cfg);
+  card.hass = hass;
+  log("конфигурация с внешней моделью применена");
+
+  const built = await waitFor("сцена внешней модели построена", () => !!card._engine);
+  const engine = card._engine;
+  step("карточка построила сцену внешней модели", built && !!engine,
+    engine ? `модель: ${engine.model.manifest.id}` : "нет сцены");
+  step("идентификатор внешней модели", !!engine && engine.model.manifest.id === "probe-external",
+    engine ? engine.model.manifest.id : "—");
+  step("источник модели — URL", !!engine && String(engine.model.source).includes("probe-model.js"),
+    engine ? String(engine.model.source) : "—");
+
+  if (engine) {
+    const b = engine.bindingView();
+    step("привязка внешней модели прочитана", !!b.power && b.power.entity === "switch.machine" && b.power.value === true,
+      b.power ? `entity=${b.power.entity}, value=${b.power.value}` : "нет привязки");
+
+    // ждём кадр и меряем «нарисовалось ли»
+    await raf();
+    engine._frame(0);
+    const root = card.shadowRoot.querySelector(".t3d-root");
+    const canvas = root.querySelector("canvas");
+    const off = document.createElement("canvas");
+    off.width = canvas.width; off.height = canvas.height;
+    const g = off.getContext("2d");
+    g.drawImage(canvas, 0, 0);
+    const data = g.getImageData(0, 0, off.width, off.height).data;
+    let colored = 0, total = 0;
+    const colors = new Set();
+    for (let y = 0; y < off.height; y += 7) {
+      for (let x = 0; x < off.width; x += 7) {
+        const i = (y * off.width + x) * 4;
+        total++;
+        if (data[i + 3] > 8 && (data[i] > 12 || data[i + 1] > 12 || data[i + 2] > 12)) colored++;
+        colors.add(`${data[i] >> 4},${data[i + 1] >> 4},${data[i + 2] >> 4}`);
+      }
+    }
+    const ratio = +(colored / total).toFixed(3);
+    step("внешняя модель нарисована", ratio > 0.02 && colors.size > 5,
+      `заполнено ${ratio}, цветов ${colors.size}, canvas ${canvas.width}x${canvas.height}`);
+
+    // смена параметра из редактора не пересоздаёт сцену
+    const beforeEngine = engine;
+    card.setConfig(Object.assign({}, cfg, { params: { color: "#ff8800" } }));
+    await sleep(300);
+    step("смена настроек не пересоздаёт сцену", card._engine === beforeEngine,
+      card._engine === beforeEngine ? "тот же движок" : "движок пересоздан");
+
+    // клик по объекту открывает модалку сущности
+    engine.openEntityModal("switch.machine", "power");
+    await raf();
+    const modal = card.shadowRoot.querySelector(".t3d-modal-backdrop");
+    step("модалка сущности для внешней модели", !!modal && modal.style.display !== "none");
+  }
+
+  report.ok = report.steps.every((s) => s.ok) && errors.length === 0;
+} catch (e) {
+  errors.push(`исключение: ${e && e.message}`);
+}
+
+log(`ИТОГ: ${report.ok ? "ОК" : "ЕСТЬ ПРОБЛЕМЫ"}`);
+await fetch("/__report", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(report, null, 2),
+}).catch(() => {});
+</script>
+</body>
+</html>

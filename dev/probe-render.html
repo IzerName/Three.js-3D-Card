@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>probe-render</title>
+<style>
+  :root{--card-background-color:#151a22;--primary-text-color:#e6edf5;--divider-color:rgba(130,150,180,.28);
+        --primary-color:#1f6feb;--color-2:#2f9df4;--ha-card-border-radius:12px;--secondary-text-color:#8b98a8;}
+  body{background:#0b0e13;color:#e6edf5;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0}
+  threejs-3d-card{display:block;width:900px;height:360px}
+  #log{padding:8px}
+</style>
+</head>
+<body>
+<div id="log">старт…</div>
+<threejs-3d-card id="tankCard"></threejs-3d-card>
+<threejs-3d-card id="roomCard"></threejs-3d-card>
+
+<script type="module">
+// Цель: доказать, что обе модели действительно рисуют кадры на карточке.
+// Читать WebGL-канвас в headless-режиме нельзя (software compositing),
+// поэтому смотрим счётчики three.js: вызовы render и число треугольников.
+const out = [];
+const errors = [];
+const log = (s) => { out.push(s); document.getElementById("log").innerHTML = out.join("<br>"); };
+window.addEventListener("error", (e) => errors.push(`${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => errors.push("unhandled: " + ((e.reason && e.reason.message) || e.reason)));
+const origError = console.error;
+console.error = (...a) => { errors.push(a.map((x) => (x && x.stack) || String(x)).join(" ").split("\n").slice(0, 3).join(" | ")); origError(...a); };
+
+const now = new Date().toISOString();
+const ent = (s, a) => ({ state: s, attributes: a || {}, last_changed: now, last_updated: now });
+const hass = {
+  states: {
+    "sensor.water_level": ent("62", { unit_of_measurement: "%" }),
+    "switch.machine": ent("on", { friendly_name: "Станок" }),
+    "light.light_1": ent("on", { brightness: 180 }),
+  },
+  callService() {},
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const report = { ok: false, steps: [], errors, log: out };
+const step = (n, ok, d) => { report.steps.push({ name: n, ok, detail: d }); log(`${ok ? "✔" : "✖"} ${n}${d ? " — " + d : ""}`); };
+
+async function waitFor(label, cond, timeoutMs = 25000) {
+  const t0 = performance.now();
+  for (;;) {
+    let ok = false;
+    try { ok = !!cond(); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (performance.now() - t0 > timeoutMs) { log("ТАЙМАУТ: " + label); return false; }
+    await sleep(100);
+  }
+}
+
+/** Снимок счётчиков рендера внутреннего движка модели. */
+function counters(card) {
+  const inner = card._engine && card._engine._modelHandle && card._engine._modelHandle.engine;
+  const r = inner && inner.renderer;
+  return {
+    inner: !!inner,
+    sceneChildren: inner && inner.scene ? inner.scene.children.length : -1,
+    calls: r && r.info ? r.info.render.calls : null,
+    triangles: r && r.info ? r.info.render.triangles : null,
+    canvas: r ? `${r.domElement.width}x${r.domElement.height}` : null,
+    contextLost: r && r.getContext ? r.getContext().isContextLost() : null,
+    loopRunning: !!(inner && inner.running),
+  };
+}
+
+try {
+  await import("/threejs-3d-card.js");
+
+  const tankCard = document.getElementById("tankCard");
+  const roomCard = document.getElementById("roomCard");
+
+  // 1. Бак
+  tankCard.setConfig({ type: "custom:threejs-3d-card", model: "water-tank", height: 360, entities: { level: "sensor.water_level" } });
+  tankCard.hass = hass;
+  const tankBuilt = await waitFor("бак построен", () => !!tankCard._engine);
+  const c1a = counters(tankCard);
+  await sleep(1200);
+  const c1b = counters(tankCard);
+  step("бак: сцена построена", tankBuilt && c1a.inner, JSON.stringify(c1a));
+  step("бак: кадры идут (render вызывается)", c1b.calls > c1a.calls || c1b.calls > 0,
+    `вызовы render: ${c1a.calls} → ${c1b.calls}, треугольников: ${c1b.triangles}, цикл: ${c1b.loopRunning}`);
+  step("бак: контекст не потерян", c1b.contextLost === false, `contextLost=${c1b.contextLost}`);
+
+  // 2. Цех (сразу, без переключения)
+  roomCard.setConfig({ type: "custom:threejs-3d-card", model: "production-room", height: 360, entities: { machine: "switch.machine", light1: "light.light_1" } });
+  roomCard.hass = hass;
+  const roomBuilt = await waitFor("цех построен", () => !!roomCard._engine);
+  const c2a = counters(roomCard);
+  await sleep(1200);
+  const c2b = counters(roomCard);
+  step("цех: сцена построена", roomBuilt && c2a.inner, JSON.stringify(c2a));
+  step("цех: кадры идут (render вызывается)", c2b.calls > c2a.calls || c2b.calls > 0,
+    `вызовы render: ${c2a.calls} → ${c2b.calls}, треугольников: ${c2b.triangles}, цикл: ${c2b.loopRunning}`);
+  step("цех: геометрия отправляется в отрисовку", c2b.triangles > 0, `треугольников: ${c2b.triangles}`);
+  step("цех: контекст не потерян", c2b.contextLost === false, `contextLost=${c2b.contextLost}`);
+
+  // 3. Переключение бак → цех на ОДНОЙ карточке
+  tankCard.setConfig({ type: "custom:threejs-3d-card", model: "production-room", height: 360, entities: { machine: "switch.machine" } });
+  const switched = await waitFor("переключение завершено", () => !!tankCard._engine && tankCard._engine.model.manifest.id === "production-room");
+  const c3a = counters(tankCard);
+  await sleep(1500);
+  const c3b = counters(tankCard);
+  step("переключение: модель сменилась", switched, tankCard._engine ? tankCard._engine.model.manifest.id : "нет сцены");
+  step("переключение: кадры идут", c3b.calls > c3a.calls || c3b.calls > 0,
+    `вызовы render: ${c3a.calls} → ${c3b.calls}, треугольников: ${c3b.triangles}, сцена: ${c3b.sceneChildren}, цикл: ${c3b.loopRunning}`);
+  step("переключение: контекст не потерян", c3b.contextLost === false, `contextLost=${c3b.contextLost}`);
+
+  report.ok = report.steps.every((s) => s.ok) && errors.length === 0;
+} catch (e) {
+  errors.push("исключение: " + (e && e.message));
+}
+
+log("ИТОГ: " + (report.ok ? "ОК" : "ЕСТЬ ПРОБЛЕМЫ"));
+await fetch("/__report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report, null, 2) }).catch(() => {});
+</script>
+</body>
+</html>
