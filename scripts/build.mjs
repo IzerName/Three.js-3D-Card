@@ -295,15 +295,10 @@ async function buildBundle(minify) {
   const entry = path.join(DIST, "bundle-entry.js");
   await fs.writeFile(entry, BUNDLE_ENTRY_SRC, "utf8");
 
-  const cli = path.join(ROOT, "node_modules", "esbuild", "bin", "esbuild");
-  try {
-    await fs.access(cli);
-  } catch {
-    throw new Error("не найден esbuild: выполните npm install (он нужен для однофайловой сборки)");
-  }
+  const cli = await esbuildBinary();
 
   const args = [
-    cli,
+    ...cli.args,
     entry,
     "--bundle",
     "--format=esm",
@@ -314,7 +309,7 @@ async function buildBundle(minify) {
   ];
   if (minify) args.push("--minify");
 
-  const res = spawnSync(process.execPath, args, { cwd: ROOT, encoding: "utf8" });
+  const res = spawnSync(cli.cmd, args, { cwd: ROOT, encoding: "utf8" });
   if (res.error) throw new Error(`esbuild не запустился: ${res.error.message}`);
   if (res.status !== 0) {
     throw new Error(`esbuild вернул код ${res.status}: ${(res.stderr || res.stdout || "").trim()}`);
@@ -323,6 +318,37 @@ async function buildBundle(minify) {
   const warnings = (res.stderr || "").trim();
   const stat = await fs.stat(BUNDLE_OUT);
   return { size: stat.size, warnings };
+}
+
+/**
+ * Чем запускать esbuild.
+ *
+ * Тонкость: файл node_modules/esbuild/bin/esbuild — это JS-обёртка только на
+ * Windows (там же рядом лежат .cmd/.ps1). На Linux и macOS установщик пакета
+ * подменяет его нативным бинарником, и запуск через `node` падает на первой же
+ * строке (именно так сломалась сборка в CI). Поэтому сначала берём «сырой»
+ * бинарник из платформенного пакета @esbuild/<platform>-<arch>, а обёртку
+ * используем только как запасной вариант — и на Windows запускаем её через node.
+ */
+async function esbuildBinary() {
+  const exe = process.platform === "win32" ? "esbuild.exe" : "esbuild";
+  const platformPkg = path.join(ROOT, "node_modules", "@esbuild", `${process.platform}-${process.arch}`);
+  for (const candidate of [path.join(platformPkg, exe), path.join(platformPkg, "bin", exe)]) {
+    try {
+      await fs.access(candidate);
+      return { cmd: candidate, args: [] };
+    } catch { /* пробуем следующий вариант */ }
+  }
+
+  const shim = path.join(ROOT, "node_modules", "esbuild", "bin", "esbuild");
+  try {
+    await fs.access(shim);
+    return process.platform === "win32"
+      ? { cmd: process.execPath, args: [shim] }
+      : { cmd: shim, args: [] };
+  } catch { /* дальше — ошибка */ }
+
+  throw new Error("не найден esbuild: выполните npm install (он нужен для однофайловой сборки)");
 }
 
 /**
