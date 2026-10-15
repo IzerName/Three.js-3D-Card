@@ -257,3 +257,134 @@ test("смена привязок на лету доходит до модели
   assert.equal(last[1], "sensor.b", "новая сущность не дошла до модели");
   assert.equal(last[2], 77, "значение новой сущности не прочитано");
 });
+
+// ============================================================================
+//  T-003: host: "external" — управление камерой от общего модуля карточки.
+//  Модель возвращает camera (и опционально apply/pick/resetView), движок
+//  сам канвас не слушает: жесты приходят из createCameraControls один раз.
+// ============================================================================
+
+/** Прогнать событие через слушатели заглушки (реальных DOM-событий нет). */
+function fire(el, type, props = {}) {
+  const e = Object.assign({
+    type,
+    pointerId: 1,
+    pointerType: "mouse",
+    button: 0,
+    shiftKey: false,
+    clientX: 0,
+    clientY: 0,
+    deltaY: 0,
+    preventDefault() {},
+    stopPropagation() {},
+  }, props);
+  (el._listeners[type] || []).slice().forEach((fn) => fn(e));
+  return e;
+}
+
+test("T-003: external-модель, вернувшая camera, получает жесты от карточки", async () => {
+  const gestures = [];
+  const picks = [];
+  const cam = { position: { x: 0, y: 0, z: 5 }, aspect: 1.33, updateProjectionMatrix() {} };
+  const model = {
+    manifest: { id: "ext-cam", name: "Внешняя камера", apiVersion: 1, host: "external", environment: { floor: "none" } },
+    bindings: [],
+    params: [],
+    defaults: {},
+    create() {
+      return {
+        external: true,
+        root: null,
+        camera: cam,
+        apply: (g) => gestures.push(g),
+        pick: (e) => picks.push(e),
+        frame() {},
+        dispose() {},
+      };
+    },
+  };
+  const engine = await makeEngine(model, { entities: {} });
+
+  // Карточка присоединила общий модуль к камере модели.
+  assert.ok(engine._camControls, "контрол камеры не создан");
+  assert.ok(engine.canvas._listeners["pointerdown"], "на канвасе нет слушателя pointerdown");
+  assert.ok(engine.canvas._listeners["wheel"], "на канвасе нет слушателя wheel");
+
+  // Вращение: pointerdown → pointermove (dx = 30) → pointerup.
+  fire(engine.canvas, "pointerdown", { clientX: 100, clientY: 100 });
+  fire(engine.canvas, "pointermove", { clientX: 130, clientY: 100 });
+  fire(engine.canvas, "pointerup", { clientX: 130, clientY: 100 });
+  assert.equal(gestures.length, 1, "одно перемещение указателя — ровно один жест");
+  assert.equal(gestures[0].type, "orbit");
+  assert.equal(gestures[0].dx, 30);
+  assert.equal(gestures[0].dy, 0);
+
+  // Тап: короткий, без движения → pick.
+  fire(engine.canvas, "pointerdown", { clientX: 50, clientY: 50 });
+  fire(engine.canvas, "pointerup", { clientX: 50, clientY: 50 });
+  assert.equal(picks.length, 1, "тап должен вызвать pick");
+
+  // Перетаскивание дальше порога → новым выбором не считается.
+  fire(engine.canvas, "pointerdown", { clientX: 50, clientY: 50 });
+  fire(engine.canvas, "pointermove", { clientX: 90, clientY: 50 });
+  fire(engine.canvas, "pointermove", { clientX: 130, clientY: 50 });
+  fire(engine.canvas, "pointerup", { clientX: 130, clientY: 50 });
+  assert.equal(picks.length, 1, "перетаскивание не должно вызывать pick");
+
+  // Колесо → zoom с коэффициентом exp(deltaY * 0.0012).
+  fire(engine.canvas, "wheel", { deltaY: -100 });
+  const zoom = gestures.find((g) => g.type === "zoom");
+  assert.ok(zoom, "жест zoom не получен");
+  assert.ok(Math.abs(zoom.factor - Math.exp(-100 * 0.0012)) < 1e-9, `factor=${zoom.factor}`);
+
+  // Двойной клик → reset ровно один раз (без дубля через onReset).
+  fire(engine.canvas, "dblclick");
+  assert.equal(gestures.filter((g) => g.type === "reset").length, 1, "reset должен прийти один раз");
+
+  engine.dispose();
+  assert.equal(engine._camControls, null, "после dispose контрола нет");
+});
+
+test("T-003: external-камера без apply — один pointermove = ровно одно обновление камеры", async () => {
+  let sets = 0, looks = 0, resets = 0;
+  const cam = {
+    position: { x: 0, y: 0, z: 5, set() { sets++; return this; } },
+    lookAt() { looks++; },
+    aspect: 1.33,
+    updateProjectionMatrix() {},
+  };
+  const model = {
+    manifest: { id: "ext-cam-builtin", name: "Внешняя камера (встроенная математика)", apiVersion: 1, host: "external", environment: { floor: "none" } },
+    bindings: [],
+    params: [],
+    defaults: {},
+    create() {
+      return {
+        external: true,
+        root: null,
+        camera: cam,
+        view: { target: { x: 0, y: 0, z: 0 }, radius: 5, phi: 1.2, theta: 0 },
+        resetView() { resets++; },
+        frame() {},
+        dispose() {},
+      };
+    },
+  };
+  const engine = await makeEngine(model, { entities: {} });
+  assert.ok(engine._camControls, "контрол камеры не создан");
+
+  // Счётчики обнуляем после init: модуль мог один раз применить вид при
+  // присоединении — проверяем ровно одно обновление на один pointermove.
+  sets = 0; looks = 0;
+  fire(engine.canvas, "pointerdown", { clientX: 100, clientY: 100 });
+  fire(engine.canvas, "pointermove", { clientX: 110, clientY: 100 });
+  assert.equal(sets, 1, `position.set вызван ${sets} раз, ожидался ровно один`);
+  assert.equal(looks, 1, `lookAt вызван ${looks} раз, ожидался ровно один`);
+  fire(engine.canvas, "pointerup", { clientX: 110, clientY: 100 });
+
+  // Двойной клик → resetView модели ровно один раз.
+  fire(engine.canvas, "dblclick");
+  assert.equal(resets, 1, `resetView вызван ${resets} раз, ожидался один`);
+
+  engine.dispose();
+});

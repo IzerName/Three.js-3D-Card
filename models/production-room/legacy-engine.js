@@ -1431,31 +1431,11 @@ export class ProductionRoomEngine {
     this._tip && this._tip.remove();
   }
 
-  // ---- события мыши --------------------------------------------------------
+  // ---- события --------------------------------------------------------------
+  // (T-003) Жесты камеры больше не идут через движок: карточка сама
+  // присоединяет к камере движка общий модуль createCameraControls и передаёт
+  // жесты через applyGesture(). Движок слушает только размер окна (ресайз сцены).
   _bindEvents() {
-    const el = this.renderer.domElement;
-    this._pointer = { down: false, moved: 0, x: 0, y: 0, btn: 0 };
-    el.addEventListener("pointerdown", (e) => {
-      this._pointer.down = true; this._pointer.moved = 0; this._pointer.btn = e.button;
-      this._pointer.x = e.clientX; this._pointer.y = e.clientY;
-      el.setPointerCapture && el.setPointerCapture(e.pointerId);
-    });
-    el.addEventListener("pointermove", (e) => {
-      if (!this._pointer.down) return;
-      const dx = e.clientX - this._pointer.x, dy = e.clientY - this._pointer.y;
-      this._pointer.x = e.clientX; this._pointer.y = e.clientY;
-      this._pointer.moved += Math.abs(dx) + Math.abs(dy);
-      if (this._pointer.btn === 0) this._orbit(dx, dy);
-      else if (this._pointer.btn === 2) this._pan(dx, dy);
-    });
-    el.addEventListener("pointerup", (e) => {
-      const wasClick = this._pointer.down && this._pointer.moved < 6 && this._pointer.btn === 0;
-      this._pointer.down = false;
-      if (wasClick) this._click(e);
-    });
-    el.addEventListener("contextmenu", (e) => e.preventDefault());
-    el.addEventListener("wheel", (e) => { e.preventDefault(); this.camRadius *= (1 + e.deltaY * 0.0012); this._clampCam(); }, { passive: false });
-
     if (typeof ResizeObserver !== "undefined") {
       // Наблюдать можно только за настоящим элементом: в режиме адаптера
       // (models/production-room/scene.js) контейнер — объект-обёртка без DOM.
@@ -1465,6 +1445,21 @@ export class ProductionRoomEngine {
         this._resizeObs.observe(domRoot);
       }
     }
+  }
+
+  /**
+   * Жест камеры от общего модуля карточки (createCameraControls, T-003):
+   *   orbit — вращение вокруг цели,
+   *   pan   — панорамирование,
+   *   zoom  — factor: >1 отдалить, <1 приблизить (колесо / щипок),
+   *   reset — возврат к исходному виду.
+   */
+  applyGesture(g) {
+    if (!g || !g.type) return;
+    if (g.type === "orbit") this._orbit(g.dx || 0, g.dy || 0);
+    else if (g.type === "pan") this._pan(g.dx || 0, g.dy || 0);
+    else if (g.type === "zoom") { this.camRadius *= g.factor || 1; this._clampCam(); }
+    else if (g.type === "reset") this.resetView();
   }
   _orbit(dx, dy) {
     // орбита: вращаем камеру вокруг цели по азимуту и углу наклона

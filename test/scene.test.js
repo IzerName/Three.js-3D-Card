@@ -96,6 +96,7 @@ function makeContext2d() {
     measureText: () => ({ width: 42 }),
     fillText() {}, clearRect() {}, fillRect() {}, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, arcTo() {}, arc() {},
+    rect() {}, clip() {},
     roundRect() {}, createRadialGradient: () => ({ addColorStop() {} }), createLinearGradient: () => ({ addColorStop() {} }),
     save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, drawImage() {},
   };
@@ -124,6 +125,8 @@ globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#2f9df4" });
 globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
 globalThis.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
 globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+// SceneEngine проверяет container instanceof Element — в Node такого глобала нет.
+globalThis.Element = El;
 
 // Цикл кадров: без WebGL и реального экрана он не нужен, но движок
 // рассчитывает, что функции существуют.
@@ -189,7 +192,13 @@ class Mat {
   dispose() { this.disposed = true; }
 }
 class Tex {
-  constructor() { this.disposed = false; }
+  constructor() {
+    this.disposed = false;
+    // Texture.repeat/offset — Vector2 в реальном three.js; движок цеха
+    // использует repeat.set() и offset.y (legacy-engine.js, текстуры).
+    this.repeat = { x: 1, y: 1, set(x, y) { this.x = x; this.y = y; return this; } };
+    this.offset = { x: 0, y: 0 };
+  }
   dispose() { this.disposed = true; }
 }
 class Mesh extends Obj3D { constructor(g, m) { super(); this.geometry = g || new Geo(); this.material = m || new Mat(); } }
@@ -241,7 +250,9 @@ const THREE = {
   TorusGeometry: class extends Geo {},
   ConeGeometry: class extends Geo {},
   ShapeGeometry: class extends Geo {},
-  GridHelper: class extends Obj3D {},
+  // GridHelper несёт material (LineBasicMaterial): движок цеха настраивает
+  // прозрачность сетки пола (legacy-engine.js, _buildScene).
+  GridHelper: class extends Obj3D { constructor(size, div, c1, c2) { super(); this.material = new Mat(); } },
   BufferGeometry: class extends Geo {},
   MeshStandardMaterial: Mat,
   MeshBasicMaterial: Mat,
@@ -387,6 +398,18 @@ test("адаптер бака: внешний движок получает об
   assert.equal(handle.external, true, "модель должна помечать себя как external");
   assert.ok(shared, "рендерер не передан карточке через setRenderer");
   assert.equal(shared.domElement, canvas, "использован не canvas карточки");
+
+  // (T-003) Движок больше не слушает канвас сам: собственных жестовых
+  // слушателей остаться не должно — жесты подключает общий модуль карточки.
+  for (const t of ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel", "contextmenu"]) {
+    assert.equal(canvas._listeners[t], undefined,
+      `движок оставил собственный слушатель "${t}" на канвасе`);
+  }
+  // (T-003) В handle — камера и адаптеры жестов для общего модуля карточки.
+  assert.ok(handle.camera, "в handle нет camera");
+  assert.equal(typeof handle.apply, "function", "в handle нет apply(gesture)");
+  assert.equal(typeof handle.resetView, "function", "в handle нет resetView");
+  assert.equal(typeof handle.pick, "function", "в handle нет pick(event)");
   assert.equal(handle.engine.probeLevels ? true : handle.engine.config.probeLevels.high === 88, true,
     "параметр probe_levels.high не дошёл до движка");
 
@@ -408,5 +431,356 @@ test("адаптер бака: внешний движок получает об
 
   handle.dispose();
   assert.equal(container.children.length, 0, "слой движка не удалён из контейнера");
+});
+
+// ============================================================================
+//  T-002: жесты SceneEngine через общий модуль camera-controls.
+// ============================================================================
+
+/** Прогнать событие через слушатели заглушки (реальные DOM-событий нет). */
+function fireScene(el, type, props = {}) {
+  const e = Object.assign({
+    type,
+    pointerId: 1,
+    pointerType: "mouse",
+    button: 0,
+    shiftKey: false,
+    clientX: 0,
+    clientY: 0,
+    deltaY: 0,
+    preventDefault() {},
+    stopPropagation() {},
+  }, props);
+  (el._listeners[type] || []).slice().forEach((fn) => fn(e));
+  return e;
+}
+
+/** Перетаскивание указателя из точки from в точку to (moves шагов). */
+function dragScene(el, from, to, moves = 1) {
+  fireScene(el, "pointerdown", { clientX: from[0], clientY: from[1] });
+  for (let i = 1; i <= moves; i++) {
+    fireScene(el, "pointermove", {
+      clientX: from[0] + (to[0] - from[0]) * (i / moves),
+      clientY: from[1] + (to[1] - from[1]) * (i / moves),
+    });
+  }
+  fireScene(el, "pointerup", { clientX: to[0], clientY: to[1] });
+}
+
+/** SceneEngine с моделью без внешнего рендеринга; камера задана детерминированно. */
+async function makeCamEngine(modelDef, config = {}) {
+  const { SceneEngine } = await import("../src/core/scene.js");
+  const container = new El("div");
+  const model = Object.assign({
+    manifest: {
+      id: "cam-test", name: "Камера", apiVersion: 1,
+      environment: { floor: "none" },
+      camera: { target: [0, 0, 0], radius: 6, phi: 1.2, theta: 0, minRadius: 0.5, maxRadius: 50 },
+    },
+    bindings: [],
+    params: [],
+    defaults: {},
+    create() { return { root: null, frame() {}, dispose() {} }; },
+  }, modelDef);
+  const engine = new SceneEngine(container, config, model, { THREE: THREE_ANY });
+  await engine.init();
+  return engine;
+}
+
+test("SceneEngine: перетаскивание вращает камеру (camState.theta, позиция камеры)", async () => {
+  const engine = await makeCamEngine({}, { entities: {} });
+  assert.ok(engine.camState, "camState не создан");
+  assert.equal(engine.camState.theta, 0, "стартовый theta");
+  const homeX = engine.camera.position.x;
+
+  dragScene(engine.canvas, [100, 100], [140, 100]);
+
+  // dx = 40, ROTATE_K = 0.006 → theta = -0.24
+  assert.ok(Math.abs(engine.camState.theta - (-0.24)) < 1e-6,
+    `theta=${engine.camState.theta}, ожидалось ≈ -0.24`);
+  assert.notEqual(engine.camera.position.x, homeX, "позиция камеры не обновлена");
+  assert.ok(engine.camera.position.x < 0, "камера должна сместиться влево при вращении");
+
+  engine.dispose();
+});
+
+test("SceneEngine: колесо меняет радиус (зум), в обе стороны", async () => {
+  const engine = await makeCamEngine({}, { entities: {} });
+  assert.equal(engine.camState.radius, 6);
+
+  fireScene(engine.canvas, "wheel", { deltaY: -120 });
+  const inRadius = 6 * Math.exp(-120 * 0.0012);
+  assert.ok(Math.abs(engine.camState.radius - inRadius) < 1e-9,
+    `radius=${engine.camState.radius}, ожидалось ${inRadius}`);
+
+  fireScene(engine.canvas, "wheel", { deltaY: 120 });
+  assert.ok(Math.abs(engine.camState.radius - 6) < 1e-6,
+    `после зума обратно radius=${engine.camState.radius}, ожидалось 6`);
+
+  engine.dispose();
+});
+
+test("SceneEngine: двойной клик возвращает камеру к исходному виду", async () => {
+  const engine = await makeCamEngine({}, { entities: {} });
+  dragScene(engine.canvas, [100, 100], [140, 100]);
+  fireScene(engine.canvas, "wheel", { deltaY: -240 });
+  assert.notEqual(engine.camState.theta, 0, "предусловие: вид смещён");
+  assert.notEqual(engine.camState.radius, 6, "предусловие: радиус смещён");
+
+  fireScene(engine.canvas, "dblclick");
+
+  assert.equal(engine.camState.theta, 0, "theta не возвращён к исходному");
+  assert.ok(Math.abs(engine.camState.radius - 6) < 1e-9, "радиус не возвращён к исходному");
+  assert.ok(Math.abs(engine.camState.phi - 1.2) < 1e-9, "phi не возвращён к исходному");
+
+  engine.dispose();
+});
+
+test("SceneEngine: тап вызывает выбор, перетаскивание — нет", async () => {
+  const engine = await makeCamEngine({}, { entities: {} });
+  const picks = [];
+  engine._pick = (e) => picks.push(e);
+
+  // тап: короткий, без движения
+  dragScene(engine.canvas, [100, 100], [100, 100]);
+  assert.equal(picks.length, 1, "тап должен вызвать _pick");
+
+  // перетаскивание: больше порога — выбором не считается
+  dragScene(engine.canvas, [100, 100], [160, 120], 3);
+  assert.equal(picks.length, 1, "перетаскивание не должно вызывать _pick");
+
+  engine.dispose();
+});
+
+test("SceneEngine: host: external — движок не вешает жесты и не падает", async () => {
+  const engine = await makeCamEngine({
+    manifest: {
+      id: "cam-external", name: "Внешний", apiVersion: 1, host: "external",
+      environment: { floor: "none" },
+      camera: { target: [0, 0, 0], radius: 6, phi: 1.2, theta: 0 },
+    },
+    create() { return { external: true, root: null, frame() {}, dispose() {} }; },
+  }, { entities: {} });
+
+  assert.equal(engine.camState, undefined, "в external-режиме camState не создаётся");
+  assert.equal(engine._camControls, null, "движок не создаёт контрол камеры");
+  assert.equal(engine.canvas._listeners["pointerdown"], undefined,
+    "на канвасе нет слушателя pointerdown от движка");
+
+  // Жесты принадлежат модели (до T-003): события, доставленные канвасу,
+  // не должны вызывать исключений — camState в этом режиме отсутствует.
+  assert.doesNotThrow(() => {
+    dragScene(engine.canvas, [100, 100], [160, 80], 3);
+    fireScene(engine.canvas, "wheel", { deltaY: -120 });
+    fireScene(engine.canvas, "dblclick");
+    fireScene(engine.canvas, "contextmenu");
+  });
+
+  engine.dispose();
+  assert.equal(engine._camControls, null, "после dispose контрола нет");
+});
+
+// ============================================================================
+//  T-003: host: "external" — жесты камеры от общего модуля карточки.
+//  Модель возвращает camera (+ apply / resetView / pick), движок сам канвас
+//  не слушает: один слушатель на тип — только от createCameraControls.
+// ============================================================================
+
+test("SceneEngine T-003: external-модель с camera и apply — карточка управляет камерой", async () => {
+  const gestures = [];
+  const picks = [];
+  const cam = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  const engine = await makeCamEngine({
+    manifest: {
+      id: "cam-external-apply", name: "Внешний (apply)", apiVersion: 1, host: "external",
+      environment: { floor: "none" },
+      camera: { target: [0, 0, 0], radius: 6, phi: 1.2, theta: 0 },
+    },
+    create() {
+      return {
+        external: true,
+        root: null,
+        camera: cam,
+        apply: (g) => gestures.push(g),
+        pick: (e) => picks.push(e),
+        frame() {},
+        dispose() {},
+      };
+    },
+  }, { entities: {} });
+
+  // Карточка присоединила общий модуль к камере модели.
+  assert.ok(engine._camControls, "карточка не создала контрол камеры");
+  for (const t of ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel", "dblclick"]) {
+    assert.ok(engine.canvas._listeners[t], `на канвасе нет слушателя "${t}"`);
+  }
+
+  // Вращение: ЛКМ, dx = 40 → жест с «сырыми» дельтами (коэффициенты — в модели).
+  dragScene(engine.canvas, [100, 100], [140, 100]);
+  assert.equal(gestures.length, 1, "одно перемещение указателя — один жест");
+  assert.equal(gestures[0].type, "orbit");
+  assert.equal(gestures[0].dx, 40);
+  assert.equal(gestures[0].dy, 0);
+
+  // Тап: короткий, без движения → pick модели.
+  dragScene(engine.canvas, [100, 100], [100, 100]);
+  assert.equal(picks.length, 1, "тап должен вызвать pick модели");
+
+  // Перетаскивание дальше порога → новым выбором не считается.
+  dragScene(engine.canvas, [100, 100], [160, 120], 3);
+  assert.equal(picks.length, 1, "перетаскивание не должно вызывать pick");
+
+  // Колесо → zoom с коэффициентом exp(deltaY * 0.0012).
+  fireScene(engine.canvas, "wheel", { deltaY: -120 });
+  const zoom = gestures.find((g) => g.type === "zoom");
+  assert.ok(zoom, "жест zoom не получен");
+  assert.ok(Math.abs(zoom.factor - Math.exp(-120 * 0.0012)) < 1e-9, `factor=${zoom.factor}`);
+
+  // Двойной клик → reset доставлен ровно один раз (apply-режим, без дубля).
+  fireScene(engine.canvas, "dblclick");
+  const resets = gestures.filter((g) => g.type === "reset");
+  assert.equal(resets.length, 1, "жест reset должен прийти ровно один раз");
+
+  engine.dispose();
+  assert.equal(engine._camControls, null, "после dispose контрола нет");
+});
+
+test("SceneEngine T-003: external-камера без apply — встроенная математика, один pointermove = одно обновление", async () => {
+  let sets = 0, looks = 0, resets = 0;
+  const cam = {
+    position: { x: 0, y: 0, z: 6, set() { sets++; return this; } },
+    lookAt() { looks++; },
+    aspect: 1.6,
+    updateProjectionMatrix() {},
+  };
+  const engine = await makeCamEngine({
+    manifest: {
+      id: "cam-external-builtin", name: "Внешний (встроенная математика)", apiVersion: 1, host: "external",
+      environment: { floor: "none" },
+    },
+    create() {
+      return {
+        external: true,
+        root: null,
+        camera: cam,
+        view: { target: { x: 0, y: 0, z: 0 }, radius: 6, phi: 1.2, theta: 0, minRadius: 1, maxRadius: 50 },
+        resetView() { resets++; },
+        frame() {},
+        dispose() {},
+      };
+    },
+  }, { entities: {} });
+
+  assert.ok(engine._camControls, "контрол создан");
+
+  // Счётчики обнуляем после init: модуль мог один раз отрисовать вид при
+  // присоединении — проверяем ровно одно обновление на один pointermove.
+  sets = 0; looks = 0;
+  fireScene(engine.canvas, "pointerdown", { clientX: 100, clientY: 100 });
+  fireScene(engine.canvas, "pointermove", { clientX: 110, clientY: 100 });
+  assert.equal(sets, 1, `position.set вызван ${sets} раз, ожидался ровно один`);
+  assert.equal(looks, 1, `lookAt вызван ${looks} раз, ожидался ровно один`);
+  fireScene(engine.canvas, "pointerup", { clientX: 110, clientY: 100 });
+
+  // Двойной клик → resetView модели ровно один раз (встроенный режим:
+  // через onReset, без apply-жеста).
+  fireScene(engine.canvas, "dblclick");
+  assert.equal(resets, 1, `resetView вызван ${resets} раз, ожидался один`);
+
+  engine.dispose();
+});
+
+test("SceneEngine T-003: бак чистой воды — жесты только от общего модуля карточки", async () => {
+  const model = (await import("../models/water-tank/manifest.js")).default;
+  const { SceneEngine } = await import("../src/core/scene.js");
+  const container = new El("div");
+  const engine = new SceneEngine(container, {
+    entities: { level: "sensor.level", liters: "sensor.liters", counter: "sensor.counter" },
+  }, model, { THREE: THREE_ANY });
+  await engine.init();
+
+  const canvas = engine.canvas;
+  // По одному слушателю на тип: только общий модуль карточки. Если бы движок
+  // вешал свои — их стало бы два и жест обрабатывался бы дважды.
+  for (const t of ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel", "contextmenu", "dblclick"]) {
+    assert.equal((canvas._listeners[t] || []).length, 1,
+      `слушателей "${t}": ${(canvas._listeners[t] || []).length}, ожидался ровно один`);
+  }
+
+  const eng = engine._modelHandle.engine;
+  const t0 = eng.camTheta;
+
+  // Вращение: ЛКМ, dx = 40 → theta -= 40 * 0.0052 (коэффициент движка).
+  dragScene(canvas, [100, 100], [140, 100]);
+  assert.ok(Math.abs(eng.camTheta - (t0 - 40 * 0.0052)) < 1e-6, `theta=${eng.camTheta}`);
+
+  // Панорама: ПКМ, dx = 30 → цель смещается по вектору "вправо".
+  const x0 = eng.camTarget.x;
+  fireScene(canvas, "pointerdown", { button: 2, clientX: 100, clientY: 100 });
+  fireScene(canvas, "pointermove", { button: 2, clientX: 130, clientY: 100 });
+  fireScene(canvas, "pointerup", { button: 2, clientX: 130, clientY: 100 });
+  assert.notEqual(eng.camTarget.x, x0, "панорама не сдвинула цель");
+
+  // Зум: колесо, factor = exp(-120 * 0.0012) (уменьшение радиуса).
+  const r0 = eng.camRadius;
+  fireScene(canvas, "wheel", { deltaY: -120 });
+  assert.ok(Math.abs(eng.camRadius - r0 * Math.exp(-120 * 0.0012)) < 1e-9, `radius=${eng.camRadius}`);
+
+  // Тап → _pick движка (модалка сущности), перетаскивание → нет.
+  const picks = [];
+  eng._pick = (e) => picks.push(e);
+  dragScene(canvas, [100, 100], [100, 100]);
+  assert.equal(picks.length, 1, "тап должен вызвать _pick");
+  dragScene(canvas, [100, 100], [160, 120], 3);
+  assert.equal(picks.length, 1, "перетаскивание не должно вызывать _pick");
+
+  // Двойной клик → resetView: исходный вид (phi 0.66, theta 0.42, radius 4.9).
+  fireScene(canvas, "dblclick");
+  assert.ok(Math.abs(eng.camTheta - 0.42) < 1e-6, `theta=${eng.camTheta}, ожидалось 0.42`);
+  assert.ok(Math.abs(eng.camPhi - 0.66) < 1e-6, `phi=${eng.camPhi}, ожидалось 0.66`);
+  assert.ok(Math.abs(eng.camRadius - 4.9) < 1e-6, `radius=${eng.camRadius}, ожидалось 4.9`);
+
+  engine.dispose();
+});
+
+test("SceneEngine T-003: производственный цех — жесты только от общего модуля карточки", async () => {
+  const model = (await import("../models/production-room/manifest.js")).default;
+  const { SceneEngine } = await import("../src/core/scene.js");
+  const container = new El("div");
+  const engine = new SceneEngine(container, { entities: {} }, model, { THREE: THREE_ANY });
+  await engine.init();
+
+  const canvas = engine.canvas;
+  for (const t of ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel", "contextmenu", "dblclick"]) {
+    assert.equal((canvas._listeners[t] || []).length, 1,
+      `слушателей "${t}": ${(canvas._listeners[t] || []).length}, ожидался ровно один`);
+  }
+
+  const eng = engine._modelHandle.engine;
+  const t0 = eng.camTheta;
+
+  // Вращение: ЛКМ, dx = 40 → theta -= 40 * 0.005 (коэффициент движка).
+  dragScene(canvas, [100, 100], [140, 100]);
+  assert.ok(Math.abs(eng.camTheta - (t0 - 40 * 0.005)) < 1e-6, `theta=${eng.camTheta}`);
+
+  // Зум: колесо, factor = exp(-120 * 0.0012).
+  const r0 = eng.camRadius;
+  fireScene(canvas, "wheel", { deltaY: -120 });
+  assert.ok(Math.abs(eng.camRadius - r0 * Math.exp(-120 * 0.0012)) < 1e-9, `radius=${eng.camRadius}`);
+
+  // Тап → _click движка (лучом в моке ничего не попадётся — главное не пасть).
+  const clicks = [];
+  eng._click = (e) => clicks.push(e);
+  dragScene(canvas, [100, 100], [100, 100]);
+  assert.equal(clicks.length, 1, "тап должен вызвать _click");
+  dragScene(canvas, [100, 100], [160, 120], 3);
+  assert.equal(clicks.length, 1, "перетаскивание не должно вызывать _click");
+
+  // Двойной клик → resetView: исходный вид (theta 0, radius 19).
+  fireScene(canvas, "dblclick");
+  assert.ok(Math.abs(eng.camTheta) < 1e-6, `theta=${eng.camTheta}, ожидалось 0`);
+  assert.ok(Math.abs(eng.camRadius - 19) < 1e-6, `radius=${eng.camRadius}, ожидалось 19`);
+
+  engine.dispose();
 });
 

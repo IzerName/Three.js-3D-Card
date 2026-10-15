@@ -3,8 +3,12 @@
 //
 //  Отвечает за всё, что одинаково для любой модели:
 //    * WebGLRenderer, свет, окружение, ресайз (ResizeObserver);
-//    * орбитальная камера (мышь: ЛКМ — вращение, ПКМ — сдвиг, колесо — зум;
-//      касания: один палец — вращение, два — зум/сдвиг);
+//    * орбитальная камера через createCameraControls (src/core/camera-controls.js):
+//      мышь — ЛКМ вращение, ПКМ или Shift+ЛКМ сдвиг, колесо зум, двойной клик
+//      сброс вида; касания — один палец вращение, два щипок-зум и сдвиг, двойной
+//      тап сброс вида, одиночный тап — выбор объекта; тот же набор жестов работает
+//      и у моделей с host: "external" — карточка сама присоединяет модуль к
+//      камере модели (T-003);
 //    * выбор объектов лучом (Raycaster) и модальное окно сущности
 //      с атрибутами, управлением и переходом в Home Assistant;
 //    * HUD-оверлей (заголовок, подпись, диагностика);
@@ -22,8 +26,20 @@ import {
 import { clamp, ease, esc, resolveColor, isDarkTheme, observeVisibility, prefersReducedMotion } from "./util.js";
 import { ensureStyles } from "./styles.js";
 import { DOMAIN_LABELS, CARD_VERSION } from "./constants.js";
+import { createCameraControls } from "./camera-controls.js";
 
 const MAX_PIXEL_RATIO = 2;
+
+/**
+ * Привести точку ориентира (THREE.Vector3, [x, y, z] или {x, y, z}) к обычному
+ * объекту без обращений к three.js — чтобы исходный вид внешней камеры
+ * (_externalView) можно было вычислить и с мок-камерой в тестах.
+ */
+function plainTarget(t) {
+  if (!t) return { x: 0, y: 0, z: 0 };
+  if (Array.isArray(t)) return { x: t[0] || 0, y: t[1] || 0, z: t[2] || 0 };
+  return { x: t.x || 0, y: t.y || 0, z: t.z || 0 };
+}
 
 export class SceneEngine {
   /**
@@ -56,6 +72,10 @@ export class SceneEngine {
     this.onDeepLink = opts.onDeepLink || null;
     this.onStatus = opts.onStatus || null;
 
+    // Хранилище файлов моделей в браузере (T-010): передаёт карточка;
+    // null — файлов нет, поведение как раньше.
+    this._assetStore = (opts && opts.assetStore) || null;
+
     this.running = false;
     this.disposed = false;
     this.visible = true;
@@ -70,6 +90,7 @@ export class SceneEngine {
     this.openKey = null;
     this._listeners = [];
     this._modelHandle = null;
+    this._camControls = null;
   }
 
   // ---- конфигурация --------------------------------------------------------
@@ -415,8 +436,37 @@ export class SceneEngine {
       },
 
       asset(relative) {
-        const base = (engine.model && engine.model._sourceUrl) || document.baseURI;
+        // T-011: _sourceUrl — базовый URL для относительных путей спеки.
+        // Для моделей asset:<имя>.json это «asset:…», а не файл: как база
+        // для new URL() он сломал бы пути (asset:../x.obj). Поэтому базой
+        // служит только реальный URL (http(s)://, /, ./), иначе — страница.
+        const raw = (engine.model && engine.model._sourceUrl) || "";
+        const base =
+          /^https?:\/\//i.test(raw) || raw.startsWith("/") || raw.startsWith("./")
+            ? raw
+            : document.baseURI;
         try { return new URL(relative, base).href; } catch (e) { return relative; }
+      },
+
+      // Файлы моделей из хранилища браузера (T-010). Читается из
+      // panelConfig — «сырой» конфигурации: _buildConfig() неизвестные
+      // поля не пробрасывает, а model_assets поле карточки, а не модели.
+      get modelAssets() {
+        return (self.panelConfig && self.panelConfig.model_assets) || null;
+      },
+      /**
+       * URL файла ассета для загрузчика three.js.
+       * @returns {Promise<{url, revoke}|null>} null — хранилище недоступно
+       *         или ассета в этом браузере нет (loadGeometry тогда выдаст
+       *         понятную ошибку в диагностике).
+       */
+      async assetFile(id) {
+        if (!self._assetStore) return null;
+        try {
+          return await self._assetStore.objectUrl(id);
+        } catch (e) {
+          return null;
+        }
       },
 
       makeLabel: (text, o) => self.makeLabel(text, o),
@@ -463,7 +513,22 @@ export class SceneEngine {
           self.camera.updateProjectionMatrix();
           renderer.setSize(w, h, false);
         }
-      },    };
+      },
+
+      /**
+       * Общий контрол камеры (createCameraControls): единственная реализация
+       * жестов мыши и касаний. Канвас карточки и three.js уже подставлены —
+       * передайте камеру (встроенная орбитальная математика) или функцию
+       * apply(gesture) (своя математика: модуль пришлёт {type, dx, dy, factor}).
+       *
+       * Для host: "external" этот метод обычно не нужен: если модель вернула
+       * camera в handle, карточка сама присоединяет контрол (T-003) —
+       * двойное присоединение даст двойную обработку жестов.
+       */
+      controls(options) {
+        return createCameraControls(Object.assign({ element: self.canvas, THREE: self.THREE }, options || {}));
+      },
+    };
 
     return ctx;
   }
@@ -645,8 +710,12 @@ export class SceneEngine {
   _applyCameraDrift(dt) {
     if (this.reducedMotion) return;
     const drift = this.config.camera.drift;
-    if (!drift) return;
-    this.camState.theta += drift * dt * 0.05;
+    if (!drift || !this._camControls) return;
+    // Состояние вида владеет контрол (см. _bindInput): drift идёт через
+    // setView, иначе внутренняя математика модуля отстанет от camState и
+    // камера подпрыгнет при следующем жесте.
+    const view = this._camControls.getView();
+    this._camControls.setView({ theta: view.theta + drift * dt * 0.05 });
   }
 
   _updateCamera() {
@@ -691,109 +760,161 @@ export class SceneEngine {
 
   // ---- управление камерой --------------------------------------------------
 
+  /**
+   * Жесты камеры — общий модуль createCameraControls
+   * (src/core/camera-controls.js), единственная реализация: мышь и касания из
+   * одного набора. Встроенная орбитальная математика модуля; состояние вида
+   * зеркалится в this.camState в каждом onChange, чтобы движок (drift,
+   * resetView, тесты) читал его с одного места.
+   *
+   * Для host: "external" карточка сама присоединяет модуль к камере модели
+   * (T-003) — см. _bindExternalInput.
+   */
   _bindInput() {
-    const el = this.canvas;
-    let mode = null;
-    let lastX = 0, lastY = 0;
-    const pointers = new Map();
-    let pinchDist = 0;
-
-    const down = (e) => {
-      el.setPointerCapture && el.setPointerCapture(e.pointerId);
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pointers.size === 1) {
-        mode = e.button === 2 || e.shiftKey ? "pan" : "rotate";
-        lastX = e.clientX; lastY = e.clientY;
-        this._downAt = { x: e.clientX, y: e.clientY, t: performance.now(), moved: false };
-      } else if (pointers.size === 2) {
-        mode = "pinch";
-        pinchDist = pointerDistance(pointers);
-      }
-    };
-
-    const move = (e) => {
-      if (!pointers.has(e.pointerId)) return;
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-      if (mode === "pinch" && pointers.size >= 2) {
-        const d = pointerDistance(pointers);
-        if (pinchDist > 0) this._zoom(pinchDist / Math.max(d, 1));
-        pinchDist = d;
-        return;
-      }
-      if (!mode) return;
-
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      if (this._downAt && (Math.abs(e.clientX - this._downAt.x) > 3 || Math.abs(e.clientY - this._downAt.y) > 3)) {
-        this._downAt.moved = true;
-      }
-
-      if (mode === "rotate" && this.camState.panoramic) {
-        const k = 0.006;
-        this.camState.theta -= dx * k;
-        if (this.camState.tilt) {
-          this.camState.phi = clamp(this.camState.phi - dy * k, this.camState.minPhi, this.camState.maxPhi);
-        }
-      } else if (mode === "pan") {
-        const s = this.camState.radius * 0.0016;
-        const T = this.THREE;
-        const fwd = new T.Vector3(Math.sin(this.camState.theta), 0, Math.cos(this.camState.theta));
-        const right = new T.Vector3(fwd.z, 0, -fwd.x);
-        this.camState.target.addScaledVector(right, dx * s);
-        this.camState.target.y = Math.max(0, this.camState.target.y + dy * s);
-      }
-      this._updateCamera();
-      this._needsRender = true;
-    };
-
-    const up = (e) => {
-      pointers.delete(e.pointerId);
-      if (pointers.size === 0) {
-        const wasClick = this._downAt && !this._downAt.moved && performance.now() - this._downAt.t < 600;
-        mode = null;
-        this._downAt = null;
-        if (wasClick) this._pick(e);
-      } else if (pointers.size === 1) {
-        const first = [...pointers.values()][0];
-        lastX = first.x; lastY = first.y;
-        mode = "rotate";
-      }
-      el.releasePointerCapture && el.releasePointerCapture(e.pointerId);
-    };
-
-    const wheel = (e) => {
-      e.preventDefault();
-      this._zoom(Math.exp(e.deltaY * 0.0012));
-    };
-
-    const context = (e) => e.preventDefault();
-    const dbl = (e) => { e.preventDefault(); this.resetView(); };
-
-    el.addEventListener("pointerdown", down);
-    el.addEventListener("pointermove", move);
-    el.addEventListener("pointerup", up);
-    el.addEventListener("pointercancel", up);
-    el.addEventListener("wheel", wheel, { passive: false });
-    el.addEventListener("contextmenu", context);
-    el.addEventListener("dblclick", dbl);
-    this._listeners.push(() => {
-      el.removeEventListener("pointerdown", down);
-      el.removeEventListener("pointermove", move);
-      el.removeEventListener("pointerup", up);
-      el.removeEventListener("pointercancel", up);
-      el.removeEventListener("wheel", wheel);
-      el.removeEventListener("contextmenu", context);
-      el.removeEventListener("dblclick", dbl);
+    if (this._externalHost) { this._bindExternalInput(); return; }
+    const c = this.camState;
+    this._camControls = createCameraControls({
+      element: this.canvas,
+      THREE: this.THREE,
+      camera: this.camera,
+      target: c.target,
+      radius: c.radius,
+      phi: c.phi,
+      theta: c.theta,
+      minRadius: c.min,
+      maxRadius: c.max,
+      minPhi: c.minPhi,
+      maxPhi: c.maxPhi,
+      panoramic: c.panoramic,
+      tilt: c.tilt,
+      onChange: (view) => {
+        c.target.copy(view.target);
+        c.radius = view.radius;
+        c.phi = view.phi;
+        c.theta = view.theta;
+        this._updateCamera();
+        this._needsRender = true;
+      },
+      onTap: (_x, _y, e) => this._pick(e),
+      onReset: () => this.resetView(),
     });
   }
 
-  _zoom(factor) {
-    const c = this.camState;
-    c.radius = clamp(c.radius * factor, c.min, c.max);
-    this._updateCamera();
-    this._needsRender = true;
+  /**
+   * host: "external" (T-003): если модель вернула камеру в handle, карточка
+   * присоединяет к ней общий модуль жестов — орбиту, панорамирование, зум,
+   * сброс вида и одиночный тап из одного места, для мыши и касаний одинаково.
+   * Модели больше не нужно слушать канвас.
+   *
+   * Математика камеры:
+   *   * handle.apply(gesture) — у модели собственное сферическое состояние
+   *     (готовые движки): карточка передаёт жесты «как есть», сама камеру
+   *     не трогает;
+   *   * иначе — встроенная математика модуля пишет в камеру напрямую;
+   *     исходный вид — из handle.view (target, radius, phi, theta, пределы),
+   *     а если его нет — выводится из camera.position, чтобы камера не
+   *     прыгнула при присоединении.
+   *
+   * Модель, не вернувшая камеру, остаётся прежней: жесты — её забота,
+   * карточка слушателей не вешает.
+   */
+  _bindExternalInput() {
+    const h = this._modelHandle;
+    const cam = h && h.camera;
+    if (!cam || !this.canvas) return;
+    const v = this._externalView(h);
+    const hasApply = typeof h.apply === "function";
+    this._camControls = createCameraControls({
+      element: this.canvas,
+      THREE: this.THREE,
+      camera: cam,
+      target: v.target,
+      radius: v.radius,
+      phi: v.phi,
+      theta: v.theta,
+      minRadius: v.minRadius,
+      maxRadius: v.maxRadius,
+      minPhi: v.minPhi,
+      maxPhi: v.maxPhi,
+      apply: hasApply ? h.apply : null,
+      // В apply-режиме движок сообщает об изменениях сам; во встроенной
+      // математике флаг нужен для перерисовки (внешняя модель рисует в
+      // собственном цикле — флаг безвреден).
+      onChange: () => { this._needsRender = true; },
+      onTap: (_x, _y, e) => {
+        if (typeof h.pick === "function") {
+          try { h.pick(e); } catch (err) { this._reportError("pick", err); }
+        }
+      },
+      onReset: () => {
+        // В apply-режиме сброс уже доставлен через apply({ type: "reset" }) —
+        // повторный вызов resetView был бы дублем.
+        if (hasApply) return;
+        if (typeof h.resetView === "function") {
+          try { h.resetView(); } catch (err) { this._reportError("resetView", err); }
+        }
+      },
+    });
+    this._bindExternalResize();
+  }
+
+  /**
+   * Исходный вид внешней камеры (T-003): из handle.view либо выведенный из
+   * позиции камеры (ориентир — начало координат). Считается без обращений к
+   * three.js, чтобы работать и с мок-камерами в тестах.
+   */
+  _externalView(h) {
+    const cam = h.camera;
+    const v = (h.view && typeof h.view === "object") ? h.view : {};
+    const t = plainTarget(v.target);
+    const p = (cam && cam.position && typeof cam.position === "object") ? cam.position : { x: 0, y: 0, z: 5 };
+    const ox = (p.x || 0) - t.x;
+    const oy = (p.y || 0) - t.y;
+    const oz = (p.z || 0) - t.z;
+    const len = Math.sqrt(ox * ox + oy * oy + oz * oz);
+    return {
+      target: t,
+      radius: Number.isFinite(v.radius) ? v.radius : Math.max(len, 0.001),
+      phi: Number.isFinite(v.phi) ? v.phi : (len > 1e-6 ? Math.acos(clamp(oy / len, -1, 1)) : 1.2),
+      theta: Number.isFinite(v.theta) ? v.theta : Math.atan2(ox, oz),
+      minRadius: v.minRadius,
+      maxRadius: v.maxRadius,
+      minPhi: v.minPhi,
+      maxPhi: v.maxPhi,
+    };
+  }
+
+  /**
+   * host: "external" (T-003): _setupRenderer в этом режиме не создаёт
+   * ResizeObserver карточки (своего рендерера нет), поэтому размер
+   * карточки синхронизируется с камерой и рендерером модели: если у модели
+   * есть handle.resize — делегируем ей, иначе синхронизируем сами.
+   */
+  _bindExternalResize() {
+    if (typeof ResizeObserver === "undefined" || !(this.container instanceof Element)) return;
+    this._ro = new ResizeObserver(() => this._resizeExternal());
+    this._ro.observe(this.container);
+  }
+
+  /** Синхронизация внешней модели с размером контейнера (см. _bindExternalResize). */
+  _resizeExternal() {
+    const hd = this._modelHandle;
+    if (!hd) return;
+    const w = Math.max(1, this.container.clientWidth || 320);
+    const h = Math.max(1, this.container.clientHeight || 240);
+    if (typeof hd.resize === "function") {
+      try { hd.resize(w, h, this.config); } catch (e) { this._reportError("resize", e); }
+      return;
+    }
+    const cam = hd.camera;
+    if (cam && "aspect" in cam) {
+      cam.aspect = w / h;
+      if (typeof cam.updateProjectionMatrix === "function") cam.updateProjectionMatrix();
+    }
+    if (this.renderer && typeof this.renderer.setSize === "function") {
+      this.renderer.setPixelRatio && this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
+      this.renderer.setSize(w, h, false);
+    }
   }
 
   /** Выбор объекта лучом: модалка сущности или обработчик модели. */
@@ -1205,6 +1326,11 @@ export class SceneEngine {
     if (this.disposed) return;
     this.disposed = true;
     this.stop();
+    // Камерные жесты: модуль сам снимает все свои слушатели с канваса.
+    if (this._camControls) {
+      try { this._camControls.dispose(); } catch (e) { /* ignore */ }
+      this._camControls = null;
+    }
     const external = !!(this._modelHandle && this._modelHandle.external);
     try { if (this._io) this._io.disconnect(); } catch (e) { /* ignore */ }
     try { if (this._ro) this._ro.disconnect(); } catch (e) { /* ignore */ }
@@ -1246,12 +1372,6 @@ export class SceneEngine {
 function numberOr(v, fallback) {
   const n = typeof v === "number" ? v : parseFloat(v);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function pointerDistance(pointers) {
-  const [a, b] = [...pointers.values()];
-  if (!a || !b) return 0;
-  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function findUserData(obj, field) {
