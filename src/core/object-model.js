@@ -19,10 +19,13 @@
 //    });
 // ============================================================================
 
-import { loadGeometry, normalizeSource } from "./geometry.js";
+import { loadGeometryEx, normalizeSource, releaseAssetUrls } from "./geometry.js";
 import { createRuleEngine } from "./object-rules.js";
 import { normalizeBindings, normalizeParams } from "./bindings.js";
-import { clamp } from "./util.js";
+import { clamp, prefersReducedMotion } from "./util.js";
+import {
+  readGltfExtras, extrasToBindings, collectUserDataMarks, mergeBindingsExtras,
+} from "./gltf-extras.js";
 
 /** Тип значения привязки по умолчанию: подсказка движку, как читать сущность. */
 function defaultKindFor(domain, hint) {
@@ -53,6 +56,8 @@ function defaultKindFor(domain, hint) {
  * @param {object} def
  *   def.manifest  — паспорт модели (id, name, camera, …)
  *   def.source    — источник геометрии
+  *   def.bindingsFrom — { gltfExtras: true }: дополнительно читать привязки
+  *       из extras файла модели (T-012); приоритет у def.bindings
  *   def.bindings  — привязки сущностей к объектам (см. object-rules.js)
  *   def.entityConfig — переопределения полей привязок для редактора карточки
  *   def.params    — настройки модели (пробрасываются в редактор)
@@ -71,6 +76,21 @@ export function createObjectModel(def) {
 
   const bindingsSpec = def.bindings || [];
   const entityConfig = def.entityConfig || {};
+  // T-012: читать привязки из extras файла модели (кастомные свойства Blender).
+  const extrasMode = !!(def.bindingsFrom && def.bindingsFrom.gltfExtras);
+
+  // T-013: prefers-reduced-motion — карточка передаёт frame(0) (время не
+  // идёт), а правилам play нужно знать об этом: вместо проигрывания клипа
+  // ставить позу сразу на целевую точку. MediaQueryList кэшируем один раз
+  // (matchMedia дёшев, но не каждый кадр); в среде без window — false.
+  let motionQuery = null;
+  try {
+    if (typeof window !== "undefined" && window.matchMedia) {
+      motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    }
+  } catch (e) { motionQuery = null; }
+  const isReducedMotion = () =>
+    motionQuery ? motionQuery.matches : prefersReducedMotion();
 
   // Привязки для редактора карточки: из спецификации объектов получаем
   // осмысленные поля, чтобы пользователь выбирал устройства из списка.
@@ -104,11 +124,62 @@ export function createObjectModel(def) {
     editorBindings.push(binding);
   });
 
+  /**
+   * T-012: прочитать привязки из extras файла модели ДО постройки сцены.
+   *
+   * Редактор вызывает это после resolve модели (см. src/editor.js): поля
+   * привязок появляются в форме сразу, сущности с заданным в пометке
+   * entity_id подставляются автоматически. Нечитаемый файл — НЕ ошибка и
+   * не пустые поля без следа: возвращается предупреждение, которое
+   * редактор показывает в блоке привязок.
+   *
+   * @param {object} [ctx] контекст: asset(), modelAssets, assetFile(),
+   *   fetch (произвольная, для тестов).
+   * @returns {Promise<{bindings: Array, warnings: Array}>}
+   */
+  async function discoverBindings(ctx = {}) {
+    let file = null; // из хранилища браузера — revoke в finally
+    try {
+      const source = normalizeSource(
+        def.source,
+        ctx.asset ? ctx.asset(".") : undefined,
+        ctx.modelAssets || null,
+      );
+      if (source.format !== "gltf") {
+        throw new Error("bindingsFrom.gltfExtras: доступны только для glTF/GLB-моделей");
+      }
+      let readUrl = source.url;
+      if (source.isAsset && ctx.assetFile) {
+        // Файл из хранилища браузера (T-010): берём временный URL.
+        file = await ctx.assetFile(source.assetId);
+        if (!file) {
+          throw new Error(`файл модели «${source.url}» загружен в другом браузере — привязки из extras прочитать нельзя`);
+        }
+        readUrl = file.url;
+      }
+      const nodes = await readGltfExtras(readUrl, ctx.fetch);
+      const res = extrasToBindings(nodes);
+      return {
+        bindings: res.bindings.map((b, i) => toEditorExtrasBinding(b, i)),
+        warnings: res.warnings,
+      };
+    } catch (e) {
+      return { bindings: [], warnings: [e && e.message ? e.message : String(e)] };
+    } finally {
+      if (file && file.revoke) { try { file.revoke(); } catch (e2) { /* noop */ } }
+    }
+  }
+
   return {
     manifest,
     bindings: editorBindings,
     params: def.params || [],
     defaults: def.defaults || { config: { title: manifest.name, show_hud: true, height: 460 } },
+    // Источник геометрии из спека (для редактора: показать ожидаемый путь
+    // и ключ model_assets). Реестр моделей своё поле .source перезаписывает
+    // маркером источника, поэтому имя у нас другое.
+    fileSource: def.source,
+    ...(extrasMode ? { discoverBindings } : {}),
 
     /**
      * Значения привязок по умолчанию.
@@ -132,12 +203,22 @@ export function createObjectModel(def) {
 
     async create(ctx) {
       const THREE = ctx.THREE;
-      const source = normalizeSource(def.source, ctx.asset ? ctx.asset(".") : undefined);
+      // model_assets — из «сырой» конфигурации панели (ctx.modelAssets):
+      // файлы из хранилища браузера подставляются вместо путей в спеке (T-010).
+      const source = normalizeSource(
+        def.source,
+        ctx.asset ? ctx.asset(".") : undefined,
+        ctx.modelAssets || null,
+      );
 
-      const model = await loadGeometry(ctx, source);
+      // T-013: вместе с клон-деревом получаем клипы glTF; миксер живёт на
+      // дереве геометрии (без подписей и источников света) и ведёт время
+      // клипов, а правила play задают ему цель.
+      const { root: model, animations } = await loadGeometryEx(ctx, source);
       const group = new THREE.Group();
       group.name = manifest.id;
       group.add(model);
+      const mixer = animations.length ? new THREE.AnimationMixer(model) : null;
 
       // Автоматическая установка камеры по габаритам модели: пользователю не
       // нужно подбирать радиус, а модель видно целиком сразу после установки.
@@ -148,14 +229,39 @@ export function createObjectModel(def) {
         ctx.report && ctx.report("warn", `не удалось определить габариты модели: ${e.message}`);
       }
 
-      const ruleEngine = createRuleEngine(def, ctx, group);
+      // T-012: привязки из extras файла модели. GLTFLoader уже положил
+      // node.extras в userData — собираем пометки ДО разметки объектов
+      // (ctx.tag перезаписывает userData.t3d на всё поддерево).
+      let mergedBindings = bindingsSpec;
+      if (extrasMode) {
+        const marked = collectUserDataMarks(model);
+        const res = extrasToBindings(marked);
+        ctx.report && ctx.report("info",
+          `файл модели: объектов с пометками t3d — ${res.markedCount}, привязок из extras — ${res.bindings.length}`);
+        for (const w of res.warnings) ctx.report && ctx.report("warn", w);
+        mergedBindings = mergeBindingsExtras(bindingsSpec, res.bindings,
+          (m) => { ctx.report && ctx.report("warn", m); });
+        // Без entity сущность выбирает пользователь в редакторе карточки.
+        for (const b of mergedBindings) {
+          if (b.entity) continue;
+          const targets = Array.isArray(b.target) ? b.target : [b.target].filter(Boolean);
+          ctx.report && ctx.report("info",
+            `«${b.name}» (${targets.join(", ")}): сущность не задана — выберите её в редакторе карточки`);
+        }
+      }
+
+      const ruleEngine = createRuleEngine(
+        Object.assign({}, def, { bindings: mergedBindings }), ctx, group,
+        { root: model, animations, mixer });
 
       // Привязки без действия, но с доменом — тоже поддерживаем: клик по
       // объекту покажет состояние сущности в модальном окне карточки.
-      for (const b of bindingsSpec) {
+      // T-012: размечаем ВСЕ привязки (спека и extras); у привязок спека
+      // key отсутствует — старое поведение (клик просто откроет сущность).
+      for (const b of mergedBindings) {
         if (!b.target) continue;
         const targets = Array.isArray(b.target) ? b.target : [b.target];
-        for (const t of targets) tagObjectByTarget(group, t, b.entity, ctx);
+        for (const t of targets) tagObjectByTarget(group, t, b.entity, b.key, ctx);
       }
 
       ctx.report && ctx.report("info", `модель ${manifest.id} загружена, объектов: ${ruleEngine.objectNames().length}`);
@@ -186,13 +292,25 @@ export function createObjectModel(def) {
 
         frame(dt) {
           state.time += dt;
-          ruleEngine.frame(dt, state.time);
+          // Правила сначала (цели), потом миксер (T-013): применяет позу
+          // клипа, которую play только что задала. reducedMotion —
+          // правила не анимируют, а ставят позу сразу.
+          ruleEngine.frame(dt, state.time, isReducedMotion());
+          if (mixer) mixer.update(dt);
         },
 
         resize() { /* камера настраивается по габаритам, пересчёт не нужен */ },
 
         dispose() {
           ruleEngine.dispose();
+          // T-013: миксер остановлен — действия сняты, позы объектов
+          // возвращаются к исходным (engine.dispose делает то же, дубли
+          // безвредны).
+          if (mixer) mixer.stopAllAction();
+          // Отозвать blob: URL ассетов, если модель читала файлы из
+          // хранилища браузера (T-010). Геометрия в общем кэше при этом
+          // не сбрасывается: повторная загрузка возьмёт у хранилища новый URL.
+          releaseAssetUrls(group);
           // Геометрии и текстуры — общие для всех сцен (кэш), их не трогаем;
           // освобождаем только собственные копии материалов.
           group.traverse((n) => {
@@ -229,12 +347,19 @@ function describeActions(b) {
   if (b.rotate) parts.push("вращение");
   if (b.door) parts.push("открывание");
   if (b.text) parts.push("текст состояния");
+  if (b.play) parts.push("проигрывание клипа");
   for (const a of b.actions || []) if (a.action) parts.push(a.action);
   return parts.length && b.target ? `Объект модели: ${[].concat(b.target).join(", ")} — ${parts.join(", ")}` : "";
 }
 
-/** Пометить объекты модели, чтобы клик по ним открывал сущность. */
-function tagObjectByTarget(root, target, entityId, ctx) {
+/**
+ * Пометить объекты модели, чтобы клик по ним открывал сущность.
+ * T-012: key — ключ привязки (у привязок спека отсутствует → null,
+ * старое поведение; у extras — entity_id или имя объекта, и клик
+ * подставляет сущность, выбранную пользователем в редакторе).
+ */
+function tagObjectByTarget(root, target, entityId, key, ctx) {
+  const k = key || null;
   const matched = [];
   const t = String(target);
   const re = t.includes("*")
@@ -245,7 +370,31 @@ function tagObjectByTarget(root, target, entityId, ctx) {
     if (re ? re.test(n.name) : n.name.toLowerCase() === t.toLowerCase()) matched.push(n);
   });
   for (const obj of matched) {
-    if (ctx.tag) ctx.tag(obj, null, { entity: entityId });
-    else obj.userData.t3d = { key: null, entity: entityId };
+    if (ctx.tag) ctx.tag(obj, k, { entity: entityId || null });
+    else obj.userData.t3d = { key: k, entity: entityId || null };
   }
+}
+
+/**
+ * T-012: extras-привязка → форма для редактора (совместима с
+ * normalizeBindings из bindings.js). required: true — если пользователь
+ * не выбрал сущность, normalizeConfig напишет «Не выбрана сущность…».
+ * Поле entity — автозаполнение: редактор подставит его в конфиг, если
+ * пользователь ничего не выбирал сам.
+ */
+function toEditorExtrasBinding(b, i) {
+  const targets = [].concat(b.target || []);
+  const domain = guessDomain(b.key);
+  const actionNames = (b.actions || []).map((a) => a && a.action).filter(Boolean);
+  return {
+    key: b.key,
+    name: b.name || b.key,
+    group: "",
+    domain: domain ? [domain] : [],
+    value: { kind: defaultKindFor(domain, null) },
+    entity: b.entity || "",
+    hint: `Объект модели: ${targets.join(", ")} — ${actionNames.length ? actionNames.join(", ") : "без действий"}`,
+    order: 100 + i,
+    required: true,
+  };
 }

@@ -80,6 +80,16 @@ globalThis.Element = El;
 globalThis.requestAnimationFrame = () => 1;
 globalThis.cancelAnimationFrame = () => {};
 globalThis.CustomEvent = class { constructor(t, o) { this.type = t; this.detail = o && o.detail; } };
+// ProgressEvent есть в браузере, но отсутствует в Node: FileLoader three.js r160
+// строит его при стриминговой загрузке arraybuffer (GLB), если у ответа есть body.
+globalThis.ProgressEvent = class {
+  constructor(type, init = {}) {
+    this.type = type;
+    this.lengthComputable = !!init.lengthComputable;
+    this.loaded = init.loaded || 0;
+    this.total = init.total || 0;
+  }
+};
 globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => "" });
 
 // Настоящий three.js (нужен для честных Box3/Vector3/Quaternion/Color).
@@ -391,6 +401,152 @@ test("реальный OBJ: габариты деталей и физичный 
   for (let i = 0; i < 600; i++) engine.frame(0.016, i * 0.016);
   const backAngle = quatAngle(closedQuat, door.quaternion);
   assert.ok(backAngle < 0.02, `створка не вернулась: остаточный угол ${backAngle.toFixed(3)} рад`);
+});
+
+// ---- файлы моделей из хранилища браузера (T-010) -----------------------------
+//
+// Чистые функции (matchAsset/normalizeSource) проверяем на копии из src/.
+// Полный путь loadGeometry проверяем на СБОРЕННОЙ копии dist/src/core/
+// geometry.js: только там литеральные динамические импорты
+// ../../vendor/three-addons/… разрешаются (в дереве исходников каталога
+// vendor/ нет — его создаёт сборка). publish.test.js гарантирует, что
+// dist/src и src побайтово совпадают.
+
+const geo = await import("../src/core/geometry.js");
+let geoDist = null;
+async function geometryDist() {
+  if (!geoDist) geoDist = await import("../dist/src/core/geometry.js");
+  return geoDist;
+}
+
+/** Минимальный валидный GLB: заголовок + один JSON-чанк, сцены пусты. */
+function buildGlb() {
+  const json = JSON.stringify({ asset: { version: "2.0" }, scenes: [{ nodes: [] }], scene: 0 });
+  let body = new TextEncoder().encode(json);
+  while (body.length % 4 !== 0) body = new Uint8Array([...body, 0x20]); // padding: space
+  const total = 12 + 8 + body.length;
+  const buf = new ArrayBuffer(total);
+  const dv = new DataView(buf);
+  dv.setUint32(0, 0x46546c67, true);   // "glTF"
+  dv.setUint32(4, 2, true);            // version
+  dv.setUint32(8, total, true);        // length
+  dv.setUint32(12, body.length, true);   // длина чанка (в GLB сначала длина, потом тип)
+  dv.setUint32(16, 0x4e4f534a, true);    // тип чанка "JSON"
+  new Uint8Array(buf, 20).set(body);
+  return buf;
+}
+
+test("matchAsset: точное имя файла или схема asset:, без нечёткого поиска", () => {
+  const assets = { "house.glb": "t3d-asset-1", "models/room.mtl": "t3d-asset-2" };
+  assert.deepEqual(geo.matchAsset("house.glb", assets), { key: "house.glb", id: "t3d-asset-1" });
+  assert.deepEqual(geo.matchAsset("asset:models/room.mtl", assets), { key: "models/room.mtl", id: "t3d-asset-2" });
+  assert.equal(geo.matchAsset("sub/house.glb", assets), null, "суффикс не является совпадением");
+  assert.equal(geo.matchAsset("house.glb", null), null, "без model_assets ассетов нет");
+  assert.equal(geo.matchAsset(undefined, assets), null);
+});
+
+test("normalizeSource: ассет по точному ключу — id и формат по имени файла", () => {
+  const src = geo.normalizeSource({ url: "probe.glb" }, "http://test.local/www/", { "probe.glb": "t3d-asset-9" });
+  assert.equal(src.isAsset, true);
+  assert.equal(src.assetId, "t3d-asset-9");
+  assert.equal(src.url, "probe.glb", "ключ не должен резолвиться в base");
+  assert.equal(src.format, "gltf", "glb → gltf");
+});
+
+test("normalizeSource: без assets — старое поведение с резолвингом пути", () => {
+  const src = geo.normalizeSource({ url: "models/house.obj" }, "http://test.local/www/", null);
+  assert.equal(src.url, "http://test.local/www/models/house.obj");
+  assert.equal(src.mtl, "http://test.local/www/models/house.mtl");
+  assert.equal(src.isAsset, undefined);
+});
+
+test("normalizeSource: obj-ассет подбирает соседний .mtl из model_assets", () => {
+  const assets = { "room.obj": "t3d-asset-1", "room.mtl": "t3d-asset-2" };
+  const src = geo.normalizeSource({ url: "room.obj" }, "http://test.local/www/", assets);
+  assert.equal(src.mtl, "room.mtl");
+  assert.equal(src.mtlAssetId, "t3d-asset-2");
+  assert.equal(src.mtlIsAsset, true);
+});
+
+test("normalizeSource: obj-ассет без соседнего .mtl — mtl не придумывается", () => {
+  const src = geo.normalizeSource({ url: "room.obj" }, "http://test.local/www/", { "room.obj": "t3d-asset-1" });
+  assert.equal(src.mtl, undefined);
+  assert.equal(src.mtlAssetId, undefined);
+});
+
+test("normalizeSource: повторная нормализация ассета идемпотентна", () => {
+  const assets = { "probe.glb": "t3d-asset-9" };
+  const a = geo.normalizeSource({ url: "probe.glb" }, "http://test.local/www/", assets);
+  const b = geo.normalizeSource(a, "http://test.local/other/", assets);
+  assert.equal(b.url, "probe.glb", "на втором проходе base не применяется");
+  assert.equal(b.assetId, "t3d-asset-9");
+  assert.equal(b.format, "gltf");
+});
+
+test("loadGeometry: GLB из браузера — fetch только в mem:/blob:, кэш по id", async () => {
+  const geoD = await geometryDist();
+  geoD.clearGeometryCache();
+  const realFetch = globalThis.fetch;
+  const fetched = [];
+  let revokes = 0;
+  // FileLoader three.js r160 вызывает fetch(new Request(...)) — разворачиваем URL.
+  globalThis.fetch = async (url) => {
+    const u = url && typeof url === "object" && "url" in url ? String(url.url) : String(url);
+    fetched.push(u);
+    return new Response(buildGlb());
+  };
+  try {
+    const ctx = {
+      THREE,
+      report: () => {},
+      modelAssets: { "probe.glb": "t3d-asset-42" },
+      asset: () => "http://test.local/www/",
+      // «Файл» из хранилища браузера: URL не из сети.
+      assetFile: async (id) => ({ url: `mem://asset/${id}`, revoke: () => { revokes++; } }),
+    };
+    const obj = await geoD.loadGeometry(ctx, { url: "probe.glb" });
+    assert.ok(obj, "сцена построена");
+    assert.deepEqual(obj.userData._t3dAssetUrls, ["mem://asset/t3d-asset-42"]);
+    // Запросы к сети (не file:// — это HEAD-проверка vendor/ для предупреждения).
+    const modelFetches = fetched.filter((u) => !u.startsWith("file://"));
+    assert.ok(modelFetches.length >= 1, "модель ни разу не скачивалась");
+    assert.ok(modelFetches.every((u) => u.startsWith("mem://")),
+      `ожидается только blob:/mem: URL: ${JSON.stringify(modelFetches)}`);
+
+    // Повторный вызов — из кэша по id: ни одного доп. fetch.
+    const before = fetched.length;
+    const obj2 = await geoD.loadGeometry(ctx, { url: "probe.glb" });
+    assert.notEqual(obj2, obj, "каждая сцена получает свою копию");
+    assert.equal(fetched.length, before, "повторная загрузка не должна ходить за файлом");
+
+    // releaseAssetUrls отзывает URL через регистр — store получит revoke.
+    geoD.releaseAssetUrls(obj);
+    assert.equal(revokes, 1, "revoke хранилища не вызван");
+  } finally {
+    globalThis.fetch = realFetch;
+    geoD.clearGeometryCache();
+  }
+});
+
+test("loadGeometry: отсутствующий ассет — ошибка в диагностике и reject", async () => {
+  const geoD = await geometryDist();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(buildGlb()); // сеть недоступна для mem: — неважно
+  const reports = [];
+  try {
+    const ctx = {
+      THREE,
+      report: (level, msg) => reports.push([level, msg]),
+      modelAssets: { "ghost.glb": "t3d-asset-ghost" },
+      asset: () => "http://test.local/www/",
+      assetFile: async () => null, // в этом браузере файла нет
+    };
+    await assert.rejects(() => geoD.loadGeometry(ctx, { url: "ghost.glb" }), /другом браузере/);
+    assert.ok(reports.some(([l, m]) => l === "error" && m.includes("другом браузере")),
+      `в диагностике нет сообщения: ${JSON.stringify(reports)}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 // ---- вспомогательное --------------------------------------------------------

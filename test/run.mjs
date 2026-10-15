@@ -1,7 +1,8 @@
 // ============================================================================
 //  Запуск всех юнит-тестов (npm test).
 //
-//  Каждый файл запускается отдельным процессом: `node --test test/<файл>`.
+//  Каждый файл запускается отдельным процессом: `node test/<файл>`
+//  (node:test исполняется в процессе, вывод — через файловый fd).
 //  Так сделано намеренно:
 //    * тесты не делят между собой глобальные заглушки (window/document/THREE),
 //      а они есть почти в каждом файле;
@@ -13,7 +14,7 @@
 //  синхронна, поэтому отчёт не теряется при перенаправлении вывода).
 // ============================================================================
 
-import { promises as fs, writeFileSync } from "node:fs";
+import { promises as fs, writeFileSync, openSync, closeSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -29,15 +30,24 @@ const files = (await fs.readdir(DIR))
 const results = [];
 for (const file of files) {
   const t0 = Date.now();
-  // Репортёр задаём явно: Node 20 по умолчанию печатает TAP, Node 22+ — spec.
-  // Без флага сводка выглядела бы по-разному на разных версиях Node, и разбор
-  // результатов зависел бы от того, куда направлен вывод.
+  // Запускаем файл напрямую (node test/<файл>): node:test выполняется
+  // в процессе и печатает сводку (spec «ℹ tests N» или TAP «# tests N» —
+  // оба формата разбираются ниже). `node --test <файл>` нельзя: он сам
+  // рождает дочерний процесс с pipe-stdio, что отклоняется песочницей
+  // выполнения (spawn EPERM).
+  // Вывод перехватываем через файловый fd, а не через pipe: pipe-stdio
+  // отклоняется там же, а файл работает везде.
+  const tmpOut = path.join(DIR, `.last-${file}.out`);
+  const outFd = openSync(tmpOut, "w");
   const res = spawnSync(
     process.execPath,
-    ["--test", "--test-reporter=spec", path.join(DIR, file)],
-    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+    [path.join(DIR, file)],
+    { stdio: ["ignore", outFd, outFd] },
   );
-  const output = `${res.stdout || ""}\n${res.stderr || ""}`;
+  closeSync(outFd);
+  let output = "";
+  try { output = readFileSync(tmpOut, "utf8"); } catch (e) { output = ""; }
+  try { unlinkSync(tmpOut); } catch (e) { /* не критично */ }
   // Сводка: "ℹ tests 5" у spec-репортёра и "# tests 5" у TAP — понимаем оба.
   const num = (label) => {
     const spec = output.match(new RegExp(`^\\u2139 ${label} (\\d+)$`, "m"));

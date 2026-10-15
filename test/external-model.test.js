@@ -63,6 +63,53 @@ const MODELS = {
   `,
 };
 
+// T-011: JSON-спецификация — данные, а не код. Реестр парсит её
+// JSON.parse и собирает модель через createObjectModel (как .js-обёртка).
+const SPEC = {
+  manifest: { id: "spec-house", name: "Дом по спеке", apiVersion: 1 },
+  source: { format: "obj", url: "house.obj", mtl: "house.mtl" },
+  bindings: [
+    { entity: "light.kitchen", target: "Lamp_Kitchen", colors: { on: "#ffd9a0", off: "#3a3a40" } },
+    { entity: "cover.gate", target: "Gate", door: { open: 90 } },
+  ],
+  params: [{ key: "label", name: "Подпись", default: "Дом" }],
+};
+
+MODELS["spec.json"] = JSON.stringify(SPEC, null, 2);
+// Та же спека без расширения .json: детект по Content-Type (второй маркер).
+MODELS["typed-spec"] = JSON.stringify(SPEC);
+// Обёртка в стиле room.js: createObjectModel на тех же данных —
+// эталон, с которым сравниваем результат JSON-пути (parity).
+MODELS["spec-wrap.js"] =
+  "const spec = " + JSON.stringify({ ...SPEC, manifest: { ...SPEC.manifest, id: "spec-house-wrap" } }) + ";" +
+  "window.ThreeJS3DCard.defineModel(window.ThreeJS3DCard.createObjectModel(spec));";
+// Ошибочные спеки: понятные сообщения с путём к файлу обязательны (T-011).
+MODELS["broken.json"] = '{"manifest": {"id": "broken",'; // усечён — невалидный JSON
+MODELS["no-id.json"] = JSON.stringify({ source: { format: "obj", url: "x.obj" }, bindings: [] });
+MODELS["no-source.json"] = JSON.stringify({ manifest: { id: "no-source" }, bindings: [] });
+
+// Content-Type «файлов» для заглушки fetch (T-011).
+const CONTENT_TYPE = { "typed-spec": "application/json" };
+
+// T-011: хранилище asset: в Node — фейк-бэкенд поверх Map, а blob: URL
+// fetch не прочитает, поэтому AssetStore выдаст mem://-псевдо-URLы,
+// которые заглушка fetch умеет читать (паттерн из карточки T-010).
+const ASSET_BACKEND = new Map();
+function fakeBackend() {
+  return {
+    put: async (rec) => { ASSET_BACKEND.set(rec.id, rec); },
+    get: async (id) => ASSET_BACKEND.get(id) || null,
+    all: async () => [...ASSET_BACKEND.values()],
+    remove: async (id) => { ASSET_BACKEND.delete(id); },
+  };
+}
+URL.createObjectURL = () => { throw new Error("blob: недоступен в тестах Node"); };
+// Обёртка (spec-wrap.js) вызывает createObjectModel — как в браузере
+// через window.ThreeJS3DCard (тут = globalThis).
+globalThis.createObjectModel = (await import(
+  pathToFileURL(path.resolve("dist/src/core/object-model.js")).href
+)).createObjectModel;
+
 const BASE = "http://models.local/";
 let fetchCount = 0;
 
@@ -97,11 +144,24 @@ if (!globalThis.defineModel) globalThis.defineModel = () => {};
  * (через data:-URL модуль) и событию load/error — как в браузере.
  */
 globalThis.fetch = async (url) => {
+  const s = String(url);
+  // T-011: файл хранилища asset: через mem://-псевдо-URL (Node, T-010).
+  if (s.startsWith("mem://")) {
+    const id = s.slice("mem://".length).split("#")[0];
+    const rec = ASSET_BACKEND.get(id);
+    if (!rec) return { ok: false, status: 404, statusText: "Not Found", text: async () => "" };
+    return { ok: true, status: 200, statusText: "OK", text: async () => rec.blob.text() };
+  }
   fetchCount++;
-  const name = String(url).split("?")[0].split("/").pop();
+  const name = s.split("?")[0].split("/").pop();
   const body = MODELS[name];
-  if (!body) return { ok: false, status: 404, statusText: "Not Found", text: async () => "" };
-  return { ok: true, status: 200, statusText: "OK", text: async () => body };
+  if (body === undefined) return { ok: false, status: 404, statusText: "Not Found", text: async () => "" };
+  return {
+    ok: true, status: 200, statusText: "OK",
+    // headers — чтобы реестр мог детектить JSON по Content-Type (T-011).
+    headers: { get: (n) => (String(n).toLowerCase() === "content-type" ? CONTENT_TYPE[name] || "" : null) },
+    text: async () => body,
+  };
 };
 
 Object.defineProperty(El.prototype, "src", {
@@ -241,4 +301,130 @@ test("внешняя модель может использовать window.Thr
   assert.ok(globalThis.window.ThreeJS3DCard, "глобальный API не создан");
   assert.equal(globalThis.window.ThreeJS3DCard.defineModel, globalThis.defineModel,
     "window.ThreeJS3DCard.defineModel должен указывать на реестр");
+});
+
+// ---- T-011: JSON-спецификации (данные, не код) -------------------------------
+
+test("JSON-спека по URL регистрируется; bindings/params как у .js-обёртки", async () => {
+  const { registry } = await freshRegistry();
+  const model = await registry.resolve(u("spec.json"));
+  assert.equal(model.manifest.id, "spec-house");
+  assert.equal(model.bindings.length, 2);
+  assert.equal(model.bindings[0].key, "light.kitchen", "entity из спеки стал ключом привязки");
+  assert.equal(model.params.length, 1);
+  assert.equal(typeof model.create, "function");
+  assert.equal(model.source, u("spec.json"), "источник сохранён как URL спеки");
+  assert.equal(model._sourceUrl, u("spec.json"), "_sourceUrl — база для относительных путей");
+  // fileSource хранит исходный source из спеки (относительные пути как есть):
+  // в create() он нормализуется от _sourceUrl (normalizeSource — в
+  // object-model.test.js), т.е. house.obj домачивается рядом со spec.json.
+  assert.deepEqual(model.fileSource, SPEC.source, "fileSource — относительный source из спеки");
+  assert.equal(model._loadMode, "json-spec");
+  assert.ok(registry.has("spec-house"), "модель в реестре по manifest.id");
+  assert.ok(registry.has(u("spec.json")), "модель в реестре по URL");
+
+  // Parity: обёртка room.js делает createObjectModel(те же данные) —
+  // результат JSON-пути должен совпадать по bindings и params.
+  const { registry: reg2 } = await freshRegistry();
+  const wrapped = await reg2.resolve(u("spec-wrap.js"));
+  assert.equal(wrapped.manifest.id, "spec-house-wrap");
+  assert.deepEqual(model.bindings, wrapped.bindings, "bindings те же, что у обёртки");
+  assert.deepEqual(model.params, wrapped.params, "params те же, что у обёртки");
+  assert.equal(typeof wrapped.create, "function");
+});
+
+test("JSON-спека без расширения, но с Content-Type: application/json — тоже спека", async () => {
+  const { registry } = await freshRegistry();
+  const model = await registry.resolve(u("typed-spec"));
+  assert.equal(model.manifest.id, "spec-house");
+  assert.equal(model._loadMode, "json-spec");
+});
+
+test("битый JSON — понятная ошибка с путём, реестр не роняется", async () => {
+  const { registry } = await freshRegistry();
+  await assert.rejects(
+    () => registry.resolve(u("broken.json")),
+    /Не удалось разобрать JSON[\s\S]*broken\.json/
+  );
+  const ok = await registry.resolve(u("ok.js"));
+  assert.equal(ok.manifest.id, "external-ok", "реестр должен остаться работоспособным");
+});
+
+test("спека без manifest.id — понятная ошибка с путём (не «не вызвала defineModel»)", async () => {
+  const { registry } = await freshRegistry();
+  await assert.rejects(
+    () => registry.resolve(u("no-id.json")),
+    /no-id\.json[\s\S]*manifest\.id/
+  );
+});
+
+test("спека без source — понятная ошибка с путём", async () => {
+  const { registry } = await freshRegistry();
+  await assert.rejects(
+    () => registry.resolve(u("no-source.json")),
+    /no-source\.json[\s\S]*не указала source/
+  );
+});
+
+test("asset:<имя>.json — спека из хранилища браузера (T-010)", async () => {
+  const { registry } = await freshRegistry();
+  const { AssetStore, setSharedAssetStore } = await import(
+    pathToFileURL(path.resolve("dist/src/core/asset-store.js")).href
+  );
+  ASSET_BACKEND.clear();
+  const store = new AssetStore(fakeBackend());
+  await store.put(new File(
+    [JSON.stringify({
+      manifest: { id: "asset-house", name: "Дом из хранилища", apiVersion: 1 },
+      source: { format: "obj", url: "asset-house.obj" },
+      bindings: [],
+    })],
+    "asset-house.json",
+    { type: "application/json" }
+  ));
+  setSharedAssetStore(store);
+  try {
+    const model = await registry.resolve("asset:asset-house.json");
+    assert.equal(model.manifest.id, "asset-house");
+    assert.equal(typeof model.create, "function");
+    assert.equal(model._sourceUrl, "asset:asset-house.json");
+    assert.ok(registry.has("asset:asset-house.json"), "доступно по asset:-ключу");
+    // Повторный resolve — из кэша, файл не перечитывается.
+    const again = await registry.resolve("asset:asset-house.json");
+    assert.equal(model, again, "повторное разрешение из кэша");
+  } finally {
+    setSharedAssetStore(null);
+  }
+});
+
+test("asset: без хранилища — понятная ошибка", async () => {
+  const { registry } = await freshRegistry();
+  await assert.rejects(
+    () => registry.resolve("asset:ghost.json"),
+    /asset:ghost\.json[\s\S]*недоступно/
+  );
+});
+
+test("asset: файл не загружен — понятная ошибка с подсказкой", async () => {
+  const { registry } = await freshRegistry();
+  const { AssetStore, setSharedAssetStore } = await import(
+    pathToFileURL(path.resolve("dist/src/core/asset-store.js")).href
+  );
+  setSharedAssetStore(new AssetStore(fakeBackend())); // пустое хранилище
+  try {
+    await assert.rejects(
+      () => registry.resolve("asset:ghost.json"),
+      /ghost\.json[\s\S]*нет в хранилище/
+    );
+  } finally {
+    setSharedAssetStore(null);
+  }
+});
+
+test("asset: не-.json отклоняется — в хранилище только спеки", async () => {
+  const { registry } = await freshRegistry();
+  await assert.rejects(
+    () => registry.resolve("asset:room.js"),
+    /asset:room\.js[\s\S]*\.json/
+  );
 });

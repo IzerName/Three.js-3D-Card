@@ -1,0 +1,92 @@
+{
+  "asset": { "version": "2.0", "generator": "T-012 fixture" },
+  "scene": 0,
+  "scenes": [
+    { "name": "Scene", "nodes": [0, 1, 2, 3, 4, 5] }
+  ],
+  "nodes": [
+    {
+      "name": "Lamp_Kitchen",
+      "mesh": 0,
+      "extras": {
+        "t3d": {
+          "entity": "light.kitchen",
+          "action": "light",
+          "name": "Лампа",
+          "lumens": 800,
+          "on": "#ffd9a0",
+          "off": "#3a3a3a"
+        }
+      }
+    },
+    {
+      "name": "Door_Front",
+      "mesh": 0,
+      "extras": {
+        "t3d_entity": "cover.front_door",
+        "t3d_action": "door",
+        "t3d_degrees": 95,
+        "t3d_hinge": "left"
+      }
+    },
+    {
+      "name": "Fan_Bathroom",
+      "mesh": 0,
+      "extras": {
+        "t3d": {
+          "action": "rotate",
+          "axis": "y",
+          "round_per_second": 1,
+          "name": "Вентилятор"
+        }
+      }
+    },
+    {
+      "name": "Sensor_Plane",
+      "mesh": 0,
+      "extras": { "t3d_action": "play", "t3d_clip": "walk" }
+    },
+    {
+      "name": "Empty_Mark",
+      "mesh": 0,
+      "extras": { "t3d_name": "Пустая пометка" }
+    },
+    {
+      "name": "Plain_Wall",
+      "mesh": 0,
+      "extras": { "author": "T-012" }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Tri",
+      "primitives": [
+        { "attributes": { "POSITION": 0 }, "indices": 1, "material": 0 }
+      ]
+    }
+  ],
+  "materials": [
+    { "name": "Gray", "pbrMetallicRoughness": { "baseColorFactor": [0.75, 0.75, 0.75, 1.0] } }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [-1.0, -1.0, 0.0],
+      "max": [1.0, 1.0, 0.0]
+    },
+    { "bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 8, "target": 34963 }
+  ],
+  "buffers": [
+    {
+      "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAACAPwAAgL8AAAAAAAAAAAAAgD8AAAAAAAEAAgAAAAA=",
+      "byteLength": 44
+    }
+  ]
+}

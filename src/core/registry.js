@@ -10,9 +10,23 @@
 //  Контракт внешней модели (см. docs/MODEL_API.md):
 //      const { THREE, defineModel } = window.ThreeJS3DCard;
 //      defineModel({ manifest, bindings, params, create, defaults });
+//
+//  Три вида моделей (T-011):
+//    1) встроенные — таблица BUILTIN (water-tank, production-room);
+//    2) .js — код: ES-модуль или скрипт с вызовом defineModel(…), например
+//       /local/3d/room.js или обёртка createObjectModel(spec);
+//    3) .json — ДАННЫЕ, а не код: спецификация модели (manifest/source/
+//       bindings), например /local/3d/room.json или asset:room.json —
+//       файл из хранилища браузера, загруженный через редактор (T-010).
+//       .json НИКОГДА не исполняется: реестр парсит его через JSON.parse
+//       и собирает модель с помощью createObjectModel(). Относительные
+//       пути внутри спека (source.url, source.mtl) разрешаются от
+//       каталога .json-файла.
 // ============================================================================
 
 import { API_VERSION } from "./constants.js";
+import { createObjectModel } from "./object-model.js";
+import { getSharedAssetStore } from "./asset-store.js";
 
 /** Встроенные модели: id -> загрузчик (относительный путь в релизе). */
 const BUILTIN = {
@@ -119,27 +133,105 @@ export class ModelRegistry {
       return this.register(def, "builtin");
     }
 
+    // T-011: asset:<имя>.json — спецификация из хранилища браузера (T-010).
+    // Отдельная ветка: сетевого URL здесь нет, имя — не файл на сервере.
+    if (isAssetRef(id)) {
+      if (opts.allowExternal === false) throw new Error("Импорт внешних моделей отключён в конфигурации");
+      return this._loadAssetSpec(id, opts);
+    }
+
     if (!looksLikeUrl(id)) {
       throw new Error(
         `Модель «${id}» не найдена. Доступны: ${Object.keys(BUILTIN).join(", ")}. ` +
-        `Для своей модели укажите URL вида /local/3d-models/my-model.js`
+        `Для своей модели укажите URL вида /local/3d-models/my-model.js, ` +
+        `спец-файл /local/3d-models/my-model.json или asset:my-model.json — ` +
+        `файл из хранилища, загруженный через редактор`
       );
     }
     if (opts.allowExternal === false) throw new Error("Импорт внешних моделей отключён в конфигурации");
     return this._loadExternal(id, opts);
   }
 
-  /** Загрузка модели по URL (обычно /local/3d-models/… или /hacsfiles/…). */
+  /**
+   * T-011: загрузка JSON-спецификации из хранилища браузера:
+   * `model: asset:<имя>.json`. Файл попадает в хранилище через редактор
+   * (T-010); в config/www ничего не кладём. Имя обязано оканчиваться на
+   * .json — это единственный маркер спека (см. допущения карточки).
+   */
+  async _loadAssetSpec(assetKey, opts = {}) {
+    const name = String(assetKey).slice("asset:".length);
+    if (!looksLikeJsonUrl(name)) {
+      throw new Error(
+        `Модель asset:${name} — в хранилище браузера поддерживаются только ` +
+        `спец-файлы модели (<имя>.json). Кодовые модели (.js) загружаются ` +
+        `по URL, например /local/3d/my-model.js.`
+      );
+    }
+    const store = getSharedAssetStore();
+    if (!store) {
+      throw new Error(
+        `Модель asset:${name} — хранилище браузера (IndexedDB) недоступно. ` +
+        `Загрузите файл в редакторе карточки или укажите URL файла, ` +
+        `например /local/3d/${name}.`
+      );
+    }
+    let rec = null;
+    try {
+      rec = (await store.list()).find((r) => r && String(r.name) === name) || null;
+    } catch (e) {
+      rec = null; // повреждённое хранилище — дадим честную ошибку ниже
+    }
+    if (!rec) {
+      throw new Error(
+        `Модель asset:${name} — файла «${name}» нет в хранилище браузера. ` +
+        `Загрузите его в редакторе карточки (раздел «Файлы моделей»); ` +
+        `в конфигурации затем пишется model: asset:${name}.`
+      );
+    }
+    // objectUrl выдаёт временный URL файла; после чтения его отзываем,
+    // чтобы не утекала память (T-010).
+    const { url: fileUrl, revoke } = await store.objectUrl(rec.id);
+    let code;
+    try {
+      const res = await fetch(fileUrl, { cache: "no-store" });
+      if (!res.ok) throw new Error(`не удалось прочитать файл (статус ${res.status})`);
+      code = await res.text();
+    } finally {
+      try { revoke(); } catch (e) { /* URL уже отозван — не страшно */ }
+    }
+    const def = this._buildJsonSpec(assetKey, code);
+    return this._registerLoaded(def, assetKey, assetKey, "asset-json");
+  }
+
+  /**
+   * Загрузка модели по URL (обычно /local/3d-models/… или /hacsfiles/…).
+   *
+   * Два вида внешних файлов (T-011):
+   *   - .js — код: исполняется через _evaluate (script/import()/new Function);
+   *   - .json — данные-спецификация: НЕ исполняется, разбирается JSON.parse
+   *     и собирается через createObjectModel. Маркер — расширение .json;
+   *     если расширения нет, доверяем заголовку Content-Type: application/json.
+   */
   async _loadExternal(url, opts = {}) {
     const src = opts.source || null;
     const bust = opts.force ? `?v=${Date.now()}` : "";
     const finalUrl = src ? src : absoluteUrl(url) + bust;
 
     let code = opts.code;
+    let jsonByType = false;
     if (!code) {
       const res = await fetch(finalUrl, { cache: opts.force ? "reload" : "default" });
       if (!res.ok) throw new Error(`Не удалось загрузить модель (${res.status} ${res.statusText}): ${finalUrl}`);
       code = await res.text();
+      const ct = res.headers ? String(res.headers.get("content-type") || "") : "";
+      jsonByType = /json/i.test(ct);
+    }
+
+    // T-011: JSON-спецификация — данные, не код. Никаких <script>, import()
+    // и new Function: файл не исполняется вообще.
+    if (looksLikeJsonUrl(finalUrl) || jsonByType) {
+      const def = this._buildJsonSpec(finalUrl, code);
+      return this._registerLoaded(def, url, finalUrl, "json-spec");
     }
 
     const captured = [];
@@ -167,16 +259,75 @@ export class ModelRegistry {
     if (!def) {
       throw new Error(
         `Модель ${finalUrl} не вызвала defineModel(…). ` +
-        `Проверьте, что файл — это модель threejs-3d-card (см. docs/MODEL_API.md).`
+        `Проверьте, что файл — это модель threejs-3d-card (см. docs/MODEL_API.md); ` +
+        `если это спецификация модели (.json), укажите её URL или asset:<имя>.json — ` +
+        `спеки исполнению не подлежат.`
       );
     }
 
+    return this._registerLoaded(def, url, finalUrl, mode);
+  }
+
+  /**
+   * T-011: собрать модель из JSON-спецификации. Файл — данные: никакого
+   * кода в нём не исполняется. Ошибки даём с путём к файлу и подсказкой —
+   * раньше на битый JSON вылезало непонятное «модель не вызвала defineModel».
+   *
+   * @param {string} displayUrl путь для сообщений (URL файла или asset:<имя>)
+   * @param {string} code текст JSON-файла
+   * @returns {object} описание модели от createObjectModel
+   */
+  _buildJsonSpec(displayUrl, code) {
+    let spec;
+    try {
+      spec = JSON.parse(code);
+    } catch (e) {
+      throw new Error(
+        `Не удалось разобрать JSON модели ${displayUrl}: ${e.message}. ` +
+        `Файл должен быть валидной спецификацией модели ` +
+        `(пример — skills/threejs-3d-model/examples/room.json).`
+      );
+    }
+    if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+      throw new Error(
+        `Файл ${displayUrl} — не спецификация модели: корень JSON должен быть ` +
+        `объектом с полями manifest, source и bindings (пример — ` +
+        `skills/threejs-3d-model/examples/room.json).`
+      );
+    }
+    if (!spec.manifest || typeof spec.manifest !== "object" || !spec.manifest.id) {
+      throw new Error(
+        `Спецификация ${displayUrl} не указала manifest.id — без идентификатора ` +
+        `реестр не может держать модель. Добавьте в файл manifest.id ` +
+        `(пример — skills/threejs-3d-model/examples/room.json).`
+      );
+    }
+    if (!spec.source || typeof spec.source !== "object") {
+      throw new Error(
+        `Спецификация ${displayUrl} не указала source — откуда загружать файл ` +
+        `модели (OBJ/MTL или glTF/GLB). Относительные пути разрешаются от ` +
+        `каталога этого файла (или подставляются из «Файлов моделей» редактора).`
+      );
+    }
+    let def;
+    try {
+      def = createObjectModel(spec);
+    } catch (e) {
+      throw new Error(`Спецификация в ${displayUrl} некорректна: ${e.message || e}`);
+    }
+    return def;
+  }
+
+  /**
+   * Зарегистрировать готовую модель: запоминаем источник, кладём в реестр
+   * по manifest.id и по запрошенному URL (чтобы повторный resolve(url) не
+   * качал файл заново) и пишем в журнал.
+   */
+  _registerLoaded(def, url, finalUrl, mode) {
     // запомним URL как источник модели (для ctx.asset и повторных загрузок)
     def._sourceUrl = finalUrl;
     def._loadMode = mode;
     const registered = this.register(def, finalUrl);
-    // Модель доступна и по manifest.id, и по URL, которым её запросили:
-    // иначе повторный resolve(url) каждый раз качал бы файл заново.
     this.models.set(url, registered);
     this.models.set(stripQuery(url), registered);
     this.log.push({ source: finalUrl, ok: true, id: registered.manifest.id, mode });
@@ -320,8 +471,35 @@ function injectModuleScript(url) {
   });
 }
 
+/**
+ * Ссылка на внешнюю модель (T-011): сетевой URL, путь от корня/страницы,
+ * имя файла с расширением .js (код) или .json (спецификация) либо
+ * asset:<имя> — файл из хранилища браузера.
+ */
 export function looksLikeUrl(v) {
-  return /^(https?:)?\/\//.test(v) || v.startsWith("/") || v.startsWith("./") || v.endsWith(".js");
+  v = String(v);
+  return (
+    /^(https?:)?\/\//.test(v) ||
+    v.startsWith("/") ||
+    v.startsWith("./") ||
+    v.endsWith(".js") ||
+    looksLikeJsonUrl(v) ||
+    isAssetRef(v)
+  );
+}
+
+/** asset:<имя> — файл из хранилища браузера (T-010), не сетевой URL. */
+export function isAssetRef(v) {
+  return String(v).startsWith("asset:");
+}
+
+/**
+ * Расширение файла — .json (с учётом строки запроса, которую реестр
+ * подставляет при force-загрузке). Расширение — единственный маркер
+ * спецификации: переименованные файлы поддержки не получают (T-011).
+ */
+export function looksLikeJsonUrl(v) {
+  return String(v).split("?")[0].toLowerCase().endsWith(".json");
 }
 
 export function absoluteUrl(v) {
