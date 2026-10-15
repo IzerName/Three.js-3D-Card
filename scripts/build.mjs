@@ -309,7 +309,7 @@ async function buildBundle(minify) {
   ];
   if (minify) args.push("--minify");
 
-  const res = spawnSync(cli.cmd, args, { cwd: ROOT, encoding: "utf8" });
+  const res = spawnSync(cli.cmd, args, { cwd: ROOT, stdio: "inherit" });
   if (res.error) throw new Error(`esbuild не запустился: ${res.error.message}`);
   if (res.status !== 0) {
     throw new Error(`esbuild вернул код ${res.status}: ${(res.stderr || res.stdout || "").trim()}`);

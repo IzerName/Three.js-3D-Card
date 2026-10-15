@@ -9,6 +9,7 @@
 //    rotate — непрерывное вращение (вентилятор, ротор)
 //    door   — поворот/сдвиг на угол (двери, окна, шторы)
 //    text   — подпись с состоянием (спрайт поверх объекта)
+//    play   — проигрывание glTF-клипа по состоянию сущности (T-013)
 //
 //  Каждое правило задаёт цель (target), условие (when/conditions/state) и
 //  параметры. Значения плавно подводятся к цели, поэтому анимации выглядят
@@ -24,9 +25,12 @@ const DEFAULT_RATE = 6;        // скорость сглаживания, 1/с
  * Построить движок правил по спецификации модели.
  * @param {object} spec   объект `bindings` из спецификации (или сама спецификация)
  * @param {object} ctx    контекст модели (THREE, makeLabel, report, …)
- * @param {THREE.Object3D} root  корень загруженной модели
+ * @param {THREE.Object3D} root  корень модели (группа с геометрией и подписями)
+ * @param {{root: THREE.Object3D, animations: Array, mixer: (THREE.AnimationMixer|null)} [anim]}
+ *        анимационный контекст (T-013): дерево геометрии (для проверки треков
+ *        клипов), клипы glTF и миксер. Без него действие play не создаётся.
  */
-export function createRuleEngine(spec, ctx, root) {
+export function createRuleEngine(spec, ctx, root, anim) {
   const THREE = ctx.THREE;
   const index = buildIndex(root);
   // Группы объектов объявляются в спецификации и разрешаются до привязок,
@@ -37,9 +41,21 @@ export function createRuleEngine(spec, ctx, root) {
   const lights = [];
   const warnings = [];
 
+  // T-013: play готовим ПЕРВЫМ — наличие клипа решает, чья это поза:
+  // клипа (play) или процедурного door/rotate. Конфликт разбиваем до
+  // остальных правил, чтобы prepareHinge не сдвигал геометрию «не в ту»
+  // части модели.
   for (const b of bindings) {
     for (const rule of b.rules) {
-      prepareRule(rule, b, { THREE, ctx, index, labels, lights, warnings });
+      if (rule.action !== "play") continue;
+      preparePlayRule(rule, b, { THREE, ctx, anim: anim || null, warnings });
+    }
+  }
+  flagPlayConflicts(bindings, warnings);
+  for (const b of bindings) {
+    for (const rule of b.rules) {
+      if (rule.action === "play") continue;
+      prepareRule(rule, b, { THREE, ctx, index, labels, lights, warnings, root, anim: anim || null });
     }
   }
   if (warnings.length && ctx.report) warnings.forEach((w) => ctx.report("warn", w));
@@ -48,7 +64,7 @@ export function createRuleEngine(spec, ctx, root) {
 
   const runtime = new Map();     // ключ привязки -> текущее состояние сущности
   /** Счётчики применений по действиям — для диагностики (см. status()). */
-  const applied = { color: 0, hide: 0, light: 0, rotate: 0, door: 0, text: 0 };
+  const applied = { color: 0, hide: 0, light: 0, rotate: 0, door: 0, text: 0, play: 0 };
 
   function setEntity(key, info) {
     runtime.set(key, info);
@@ -60,7 +76,7 @@ export function createRuleEngine(spec, ctx, root) {
     }
   }
 
-  function frame(dt, time) {
+  function frame(dt, time, reducedMotion) {
     for (const b of bindings) {
       for (const rule of b.rules) {
         if (rule._dirty) {
@@ -68,7 +84,7 @@ export function createRuleEngine(spec, ctx, root) {
           rule._dirty = false;
         }
         try {
-          applyRule(rule, dt, time, ctx);
+          applyRule(rule, dt, time, ctx, reducedMotion);
         } catch (e) {
           // Ошибку в правиле показываем один раз на правило, но не роняем кадр:
           // из-за одной модели без материала не должна пропадать вся сцена.
@@ -94,6 +110,9 @@ export function createRuleEngine(spec, ctx, root) {
       if (light.parent) light.parent.remove(light);
       if (light.dispose) light.dispose();
     }
+    // T-013: миксер остановлен — все действия сняты, позы объектов
+    // возвращаются к исходным (restoreOriginalState внутри three.js).
+    if (anim && anim.mixer && anim.mixer.stopAllAction) anim.mixer.stopAllAction();
     labels.length = 0;
     lights.length = 0;
   }
@@ -147,6 +166,12 @@ export function createRuleEngine(spec, ctx, root) {
             ? [`${r.object.position.x.toFixed(2)}`, `${r.object.position.y.toFixed(2)}`, `${r.object.position.z.toFixed(2)}`]
             : undefined,
           text: r._lastText,
+          // T-013: диагностика play
+          clip: r._clip ? r._clip.name : undefined,
+          playMode: r._mode,
+          playDir: r._playDir,
+          playTime: r._action ? r._action.time : undefined,
+          playConflict: r._conflict || undefined,
         };
       }));
     },
@@ -176,7 +201,11 @@ function collectBindings(spec, index, ctx) {
   const list = Array.isArray(spec) ? spec : (spec && spec.bindings) || [];
   const out = [];
   for (const raw of list) {
-    if (!raw || !raw.entity) continue;
+    if (!raw) continue;
+    // T-012: entity не обязателен — у привязок из glTF extras сущность
+    // выбирает пользователь в редакторе, а ключ = имя объекта (raw.key).
+    const entityKey = raw.entity || raw.key;
+    if (!entityKey) continue;
     const targets = Array.isArray(raw.target) ? raw.target : [raw.target].filter(Boolean);
     if (!targets.length) continue;
     const rules = [];
@@ -186,7 +215,7 @@ function collectBindings(spec, index, ctx) {
         const objects = resolveTarget(target, index);
         if (!objects.length) {
           missing = true;
-          if (ctx && ctx.report) ctx.report("warn", `объект «${target}» не найден в модели (привязка ${raw.entity})`);
+          if (ctx && ctx.report) ctx.report("warn", `объект «${target}» не найден в модели (привязка ${entityKey})`);
           continue;
         }
         for (const obj of objects) {
@@ -194,8 +223,8 @@ function collectBindings(spec, index, ctx) {
             action: action.action,
             target,
             object: obj,
-            entityKey: raw.entity,
-            id: `${raw.entity}:${target}:${action.action}`,
+            entityKey,
+            id: `${entityKey}:${target}:${action.action}`,
             rate: Number.isFinite(action.rate) ? action.rate : DEFAULT_RATE,
             _dirty: true,
           }));
@@ -203,7 +232,7 @@ function collectBindings(spec, index, ctx) {
       }
     }
     out.push({
-      entityKey: raw.entity,
+      entityKey,
       entity: raw,
       targets,
       rules,
@@ -228,6 +257,7 @@ function normalizeActions(raw) {
   if (raw.door) push(Object.assign({ action: "door" }, raw.door));
   if (raw.light) push(Object.assign({ action: "light" }, raw.light));
   if (raw.text) push(Object.assign({ action: "text" }, raw.text));
+  if (raw.play) push(Object.assign({ action: "play" }, raw.play));
 
   return out;
 }
@@ -369,6 +399,7 @@ function prepareRule(rule, binding, env) {
       break;
     }
     case "rotate": {
+      if (rule._conflict) break; // T-013: позу объекта ведёт клип (play)
       rule._angle = 0;
       rule._speed = 0;
       const axis = String(rule.axis || "y").toLowerCase();
@@ -378,6 +409,7 @@ function prepareRule(rule, binding, env) {
       break;
     }
     case "door": {
+      if (rule._conflict) break; // T-013: позу объекта ведёт клип (play)
       rule._progress = 0;                 // 0 — закрыто, 1 — открыто
       rule._baseQuaternion = obj.quaternion.clone();
       rule._basePosition = obj.position.clone();
@@ -405,6 +437,11 @@ function prepareRule(rule, binding, env) {
       rule._sprite = sprite;
       rule._lastText = null;
       labels.push({ sprite, rule });
+      break;
+    }
+    case "play": {
+      // Готовится отдельным проходом до остальных правил (T-013).
+      preparePlayRule(rule, binding, { THREE, ctx, anim: env.anim || null, warnings });
       break;
     }
     default:
@@ -475,6 +512,219 @@ function prepareHinge(rule, obj, THREE) {
   rule._hingeHalf = half;
 }
 
+// ---- play: glTF-клипы (T-013) ------------------------------------------------
+
+/**
+ * play + door/rotate на одном объекте: клип владеет позой, процедурное
+ * действие не применяется (prepareRule и applyRule его пропускают).
+ * Одно предупреждение на объект.
+ */
+function flagPlayConflicts(bindings, warnings) {
+  const byObject = new Map();
+  for (const b of bindings) {
+    for (const rule of b.rules) {
+      if (!rule.object) continue;
+      const list = byObject.get(rule.object);
+      if (list) list.push(rule);
+      else byObject.set(rule.object, [rule]);
+    }
+  }
+  for (const rules of byObject.values()) {
+    const play = rules.find((r) => r.action === "play" && r._action);
+    if (!play) continue;
+    const others = rules.filter((r) => r !== play && (r.action === "door" || r.action === "rotate"));
+    if (!others.length) continue;
+    for (const r of others) r._conflict = true;
+    const names = others.map((r) => r.action).filter((a, i, s) => s.indexOf(a) === i).join(", ");
+    warnings.push(`«${play.target}»: play и ${names} заданы на один объект — процедурное действие не применяется (play выигрывает)`);
+  }
+}
+
+/**
+ * Имя клипа из правила: точное, шаблон с «*»/«?», «*» — любой клип,
+ * «/регулярка/» — regex (регистр не важен).
+ * @returns {Array} совпавшие клипы (может быть несколько)
+ */
+function matchClips(pattern, clips) {
+  const p = String(pattern || "").trim();
+  if (!p || p === "*") return clips.slice();
+  if (p.length > 2 && p.startsWith("/") && p.endsWith("/")) {
+    try {
+      const re = new RegExp(p.slice(1, -1), "i");
+      return clips.filter((c) => re.test(c.name));
+    } catch (e) {
+      return [];
+    }
+  }
+  if (p.includes("*") || p.includes("?")) {
+    const re = new RegExp(
+      "^" + p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+      "i"
+    );
+    return clips.filter((c) => re.test(c.name));
+  }
+  return clips.filter((c) => c.name === p);
+}
+
+/** Список имён клипов для текста предупреждения. */
+function clipList(animations) {
+  return animations && animations.length
+    ? animations.map((c) => `«${c.name}»`).join(", ")
+    : "—";
+}
+
+/**
+ * Подготовка действия play (T-013): найти клип, создать AnimationAction на
+ * миксере модели, проверить треки клипа.
+ *
+ * Трек glTF ссылается на узел по имени; если узел в Blender без имени —
+ * по его uuid, который меняется при клонировании модели. Такой клип
+ * молча не привяжется, поэтому ищем имя узла из имени трека в клоне
+ * модели и предупреждаем («назовите объекты в Blender»).
+ */
+function preparePlayRule(rule, binding, { THREE, ctx, anim, warnings }) {
+  rule._playTime = 0;
+  rule._targetTime = undefined;
+  rule._playDir = 0;      // -1 назад / 0 не играло / +1 вперёд
+  rule._targetDir = 0;
+  rule._mode = String(rule.mode || "state").toLowerCase() === "value" ? "value" : "state";
+  rule._valueMax = Number.isFinite(rule.valueMax) && rule.valueMax > 0 ? rule.valueMax : 100;
+
+  if (rule.clip === undefined || rule.clip === null || rule.clip === "") {
+    warnings.push(`«${rule.target}»: play без клипа (clip) — пропускается`);
+    return;
+  }
+  if (!anim || !anim.mixer) {
+    warnings.push(`«${rule.target}»: клип «${rule.clip}» не найден в модели (доступно: —)`);
+    return;
+  }
+  const clips = matchClips(rule.clip, anim.animations || []);
+  if (!clips.length) {
+    warnings.push(`«${rule.target}»: клип «${rule.clip}» не найден в модели (доступно: ${clipList(anim.animations)})`);
+    return;
+  }
+  if (clips.length > 1) {
+    warnings.push(`«${rule.target}»: клип «${rule.clip}» подходит к нескольким клипам (${clipList(clips)}) — играем «${clips[0].name}»`);
+  }
+  const clip = clips[0];
+  rule._clip = clip;
+  rule._duration = clip.duration > 0 ? clip.duration : 0;
+
+  const loop = String(rule.loop || "once").toLowerCase();
+  if (loop === "repeat" || loop === "pingpong") rule._loop = loop;
+  else {
+    rule._loop = "once";
+    if (loop !== "once") {
+      warnings.push(`«${rule.target}»: неизвестный loop «${rule.loop}» — используется once`);
+    }
+  }
+  rule._speed = Math.abs(Number.isFinite(rule.speed) && rule.speed !== 0 ? rule.speed : 1);
+  rule._reverse = !!rule.reverse;
+
+  const action = anim.mixer.clipAction(clip);
+  rule._action = action;
+  action.setLoop(
+    rule._loop === "repeat" ? THREE.LoopRepeat
+      : rule._loop === "pingpong" ? THREE.LoopPingPong
+        : THREE.LoopOnce,
+    Infinity
+  );
+  action.clampWhenFinished = !!rule.clampWhenFinished;
+
+  // Проверка треков: имя узла из имени трека найдено в дереве геометрии?
+  if (THREE.PropertyBinding && anim.root) {
+    for (const track of clip.tracks || []) {
+      let nodeName = null;
+      try {
+        nodeName = THREE.PropertyBinding.parseTrackName(track.name).nodeName;
+      } catch (e) {
+        nodeName = null;
+      }
+      if (nodeName && THREE.PropertyBinding.findNode(anim.root, nodeName)) continue;
+      warnings.push(`клип «${clip.name}» ссылается на объект без имени — назовите объекты в Blender`);
+      break; // одно предупреждение на клип
+    }
+  }
+}
+
+/**
+ * play: цель по состоянию сущности.
+ * state — вперёд, пока состояние входит в on (и сущность доступна);
+ * value — время клипа = значение 0..valueMax (плавно доводится в apply).
+ */
+function computePlayRule(rule, raw, value, available) {
+  if (rule._mode === "value") {
+    const v = Number.isFinite(value) ? value : numericValue({ state: raw });
+    if (!Number.isFinite(v)) return; // значения ещё нет — позу не трогаем
+    rule._targetTime = clamp(v, 0, rule._valueMax) / rule._valueMax * rule._duration;
+    return;
+  }
+  const onStates = rule.on !== undefined ? rule.on
+    : rule.states !== undefined ? rule.states : ["on"];
+  const list = Array.isArray(onStates) ? onStates : [onStates];
+  const on = available && list.some((s) => String(s).toLowerCase() === raw.toLowerCase());
+  rule._targetDir = on ? 1 : -1;
+}
+
+/**
+ * play: применить цель (T-013).
+ *
+ * state — пока направление (_targetDir) не меняется, время ведёт сам
+ * миксер; смена направления — разворот на текущей точке. reduced motion —
+ * без движения: поза сразу целевая (для once — конец/начало клипа).
+ * value — клип закреплён на целевом времени (action.paused = true), время
+ * плавно доводится с rate; миксер при каждом update применяет позу.
+ */
+function applyPlayRule(rule, dt, ctx, reducedMotion) {
+  const action = rule._action;
+  if (!action) return;
+
+  if (rule._mode === "value") {
+    if (!rule._armed) {
+      action.reset();
+      action.paused = true;
+      action.play();
+      rule._armed = true;
+    }
+    if (rule._targetTime === undefined) return;
+    rule._playTime = reducedMotion
+      ? rule._targetTime
+      : ease(rule._playTime, rule._targetTime, rule.rate, dt);
+    action.time = clamp(rule._playTime, 0, rule._duration);
+    ctx.requestRender && ctx.requestRender();
+    return;
+  }
+
+  const dir = rule._targetDir || 0;
+  if (dir === 0) return;
+
+  if (reducedMotion) {
+    if (rule._playDir === 0) action.reset();
+    if (rule._loop === "once") action.time = clamp(dir > 0 ? rule._duration : 0, 0, rule._duration);
+    action.paused = true;
+    if (!action.isScheduled()) action.play();
+    rule._playDir = dir;
+    ctx.requestRender && ctx.requestRender();
+    return;
+  }
+
+  if (dir === rule._playDir) return; // направление не изменилось — миксер ведёт время
+  const sign = dir * (rule._reverse ? -1 : 1) * rule._speed;
+  if (rule._playDir === 0) {
+    action.reset();
+    action.timeScale = sign;
+    action.play();
+  } else {
+    // Разворот на текущей точке: время не сбрасываем; если действие
+    // завершилось (LoopOnce без clamp — enabled = false) — оживляем.
+    action.paused = false;
+    action.enabled = true;
+    action.timeScale = sign;
+  }
+  rule._playDir = dir;
+  ctx.requestRender && ctx.requestRender();
+}
+
 // ---- правила: вычисление цели ----------------------------------------------
 
 function computeRule(rule, binding, info, ctx) {
@@ -526,6 +776,10 @@ function computeRule(rule, binding, info, ctx) {
         rule._lastText = text;
         if (rule._sprite && rule._sprite.userData.redraw) rule._sprite.userData.redraw(text);
       }
+      break;
+    }
+    case "play": {
+      computePlayRule(rule, raw, value, available);
       break;
     }
     default:
@@ -676,7 +930,7 @@ function formatText(rule, binding, info, ctx) {
 
 // ---- правила: применение ----------------------------------------------------
 
-function applyRule(rule, dt, time, ctx) {
+function applyRule(rule, dt, time, ctx, reducedMotion) {
   rule._applied = (rule._applied || 0) + 1;
   switch (rule.action) {
     case "color": {
@@ -722,6 +976,7 @@ function applyRule(rule, dt, time, ctx) {
       break;
     }
     case "rotate": {
+      if (rule._conflict) return; // T-013: позу объекта ведёт клип (play)
       const speed = ease(rule._currentSpeed || 0, rule._speed || 0, 2, dt);
       rule._currentSpeed = speed;
       if (Math.abs(speed) < 1e-4) return;
@@ -731,6 +986,7 @@ function applyRule(rule, dt, time, ctx) {
       break;
     }
     case "door": {
+      if (rule._conflict) return; // T-013: позу объекта ведёт клип (play)
       const target = rule._targetProgress || 0;
       rule._progress = ease(rule._progress, target, rule.rate, dt);
       const angle = (Number.isFinite(rule.degrees) ? rule.degrees : 90) * Math.PI / 180 * rule._progress;
@@ -760,6 +1016,10 @@ function applyRule(rule, dt, time, ctx) {
         obj.quaternion.copy(rule._baseQuaternion).premultiply(q);
       }
       ctx.requestRender && ctx.requestRender();
+      break;
+    }
+    case "play": {
+      applyPlayRule(rule, dt, ctx, reducedMotion);
       break;
     }
     default:

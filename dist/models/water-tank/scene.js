@@ -87,9 +87,14 @@ export async function create(ctx) {
   const container = ctx.container;
 
   // Слой, внутри которого живёт DOM движка (canvas берём у движка сцены).
+  // (T-016) Слой лежит поверх канваса карточки и обязан быть прозрачным для
+  // ввода: жесты (камера, тап по объекту) должны доходить до canvas, к
+  // которому карточка подключает createCameraControls. Единственный
+  // интерактивный элемент слоя — модалка сущности, у неё свой
+  // pointer-events:auto (в движке), поэтому выключение у host ничего не ломает.
   const host = document.createElement("div");
   host.className = "t3d-legacy-host";
-  host.style.cssText = "position:absolute;inset:0;";
+  host.style.cssText = "position:absolute;inset:0;pointer-events:none;";
   container.appendChild(host);
 
   // Подменяем создание canvas: движок использует уже готовый рендерер.
@@ -145,6 +150,14 @@ export async function create(ctx) {
     root: null,
     // Признак: рендерер и цикл кадров принадлежат модели (движок сцены их не трогает).
     external: true,
+
+    // (T-003) Камера и жесты — общий модуль карточки: движок больше не слушает
+    // канвас, жесты приходят через applyGesture (apply ниже), а одиночный тап
+    // — через pick.
+    camera: engine.camera,
+    apply: (g) => engine.applyGesture(g),
+    resetView: () => engine.resetView(),
+    pick: (e) => engine._pick(e),
 
     /**
      * Состояния приходят по одной привязке: движок карточки вызывает

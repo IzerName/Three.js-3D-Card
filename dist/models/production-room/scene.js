@@ -38,9 +38,15 @@ export function legacyConfigFrom(cardConfig) {
 export async function create(ctx) {
   const container = ctx.container;
 
+  // (T-016) Слой лежит поверх канваса карточки и обязан быть прозрачным для
+  // ввода: жесты (камера, тап по объекту) должны доходить до canvas, к
+  // которому карточка подключает createCameraControls. HUD и подсказки
+  // движка уже pointer-events:none; единственный интерактивный элемент —
+  // модалка .pr-overlay (у неё pointer-events не задан явно, поэтому после
+  // выключения у host адаптер восстанавливает его — см. ниже).
   const host = document.createElement("div");
   host.className = "t3d-legacy-host";
-  host.style.cssText = "position:absolute;inset:0;";
+  host.style.cssText = "position:absolute;inset:0;pointer-events:none;";
   container.appendChild(host);
 
   // Движок создаёт собственный canvas и рендерер — подменяем контейнер так,
@@ -87,6 +93,12 @@ export async function create(ctx) {
 
   await engine.init();
 
+  // (T-016) host — pointer-events:none; у модалки .pr-overlay свой
+  // pointer-events не задан (в отличие от бака, где он inline), значит
+  // наследует «none» и перестаёт реагировать на кнопки и клик по фону.
+  // Восстанавливаем — это единственный интерактивный элемент слоя.
+  if (engine._overlay) engine._overlay.style.pointerEvents = "auto";
+
   const renderer = engine.renderer;
   if (renderer) {
     renderer.userData = Object.assign({}, renderer.userData, { t3dShared: true });
@@ -100,6 +112,14 @@ export async function create(ctx) {
   return {
     root: null,
     external: true,
+
+    // (T-003) Камера и жесты — общий модуль карточки: движок больше не слушает
+    // канвас, жесты приходят через applyGesture (apply ниже), а одиночный тап
+    // — через pick.
+    camera: engine.camera,
+    apply: (g) => engine.applyGesture(g),
+    resetView: () => engine.resetView(),
+    pick: (e) => engine._click(e),
 
     /**
      * Состояния приходят по одной привязке: движок карточки вызывает

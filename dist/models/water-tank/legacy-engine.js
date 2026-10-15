@@ -783,48 +783,12 @@ export class WaterTankEngine {
     this.camera.lookAt(this.camTarget);
   }
 
-  // ---- события мыши ---------------------------------------------------------------
+  // ---- события -----------------------------------------------------------------------
+  // (T-003) Жесты камеры больше не идут через движок: карточка сама
+  // присоединяет к камере движка общий модуль createCameraControls и передаёт
+  // жесты через applyGesture(). Движок слушает только размер окна (ресайз
+  // сцены) и Escape (закрытие окна сущности).
   _bindEvents() {
-    const el = this.renderer.domElement;
-    let dragBtn = -1, lastX = 0, lastY = 0, moved = 0;
-
-    el.addEventListener("pointerdown", (e) => {
-      dragBtn = e.button; lastX = e.clientX; lastY = e.clientY; moved = 0;
-      el.setPointerCapture(e.pointerId);
-      el.style.cursor = "grabbing";
-    });
-    el.addEventListener("pointermove", (e) => {
-      if (dragBtn < 0) return;
-      const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      moved += Math.abs(dx) + Math.abs(dy);
-      if (dragBtn === 0) {           // вращение
-        this.camTheta -= dx * 0.0052;
-        this.camPhi -= dy * 0.0052;
-        this._clampCam();
-      } else if (dragBtn === 2) {    // сдвиг (панорама)
-        const s = this.camRadius * 0.0011;
-        const fwd = new this.THREE.Vector3(Math.sin(this.camTheta), 0, Math.cos(this.camTheta));
-        const right = new this.THREE.Vector3(fwd.z, 0, -fwd.x);
-        this.camTarget.addScaledVector(right, dx * s);
-        this.camTarget.y += dy * s;
-        this._clampCam();
-      }
-    });
-    const up = (e) => {
-      if (dragBtn >= 0 && moved < 6 && e.button === 0) this._pick(e);
-      dragBtn = -1;
-      el.style.cursor = "grab";
-    };
-    el.addEventListener("pointerup", up);
-    el.addEventListener("pointercancel", up);
-    el.addEventListener("contextmenu", (e) => e.preventDefault());
-    el.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      this.camRadius *= (1 + e.deltaY * 0.0011);
-      this._clampCam();
-    }, { passive: false });
-
     // Наблюдать можно только за настоящим элементом: в режиме адаптера
     // (models/water-tank/scene.js) контейнер — объект-обёртка без DOM.
     const domRoot = this.opts && this.opts.canvas ? this.opts.canvas.parentElement : this.container;
@@ -836,6 +800,38 @@ export class WaterTankEngine {
     window.addEventListener("keydown", this._onKey = (e) => {
       if (e.key === "Escape") this._closeModal();
     });
+  }
+
+  /** Вращение вида вокруг цели (ЛКМ / один палец). */
+  _orbit(dx, dy) {
+    this.camTheta -= dx * 0.0052;
+    this.camPhi -= dy * 0.0052;
+    this._clampCam();
+  }
+
+  /** Сдвиг (панорама) — ПКМ / Shift+ЛКМ / два пальца. */
+  _pan(dx, dy) {
+    const s = this.camRadius * 0.0011;
+    const fwd = new this.THREE.Vector3(Math.sin(this.camTheta), 0, Math.cos(this.camTheta));
+    const right = new this.THREE.Vector3(fwd.z, 0, -fwd.x);
+    this.camTarget.addScaledVector(right, dx * s);
+    this.camTarget.y += dy * s;
+    this._clampCam();
+  }
+
+  /**
+   * Жест камеры от общего модуля карточки (createCameraControls, T-003):
+   *   orbit — вращение вокруг цели,
+   *   pan   — панорамирование,
+   *   zoom  — factor: >1 отдалить, <1 приблизить (колесо / щипок),
+   *   reset — возврат к исходному виду.
+   */
+  applyGesture(g) {
+    if (!g || !g.type) return;
+    if (g.type === "orbit") this._orbit(g.dx || 0, g.dy || 0);
+    else if (g.type === "pan") this._pan(g.dx || 0, g.dy || 0);
+    else if (g.type === "zoom") { this.camRadius *= g.factor || 1; this._clampCam(); }
+    else if (g.type === "reset") this.resetView();
   }
 
   _pick(e) {

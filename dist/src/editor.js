@@ -18,6 +18,8 @@ import {
   normalizeBindings, normalizeParams, groupBindings, validateBindings, readValue,
 } from "./core/bindings.js";
 import { prettyState, stateWithUnit, isAvailable } from "./core/state.js";
+import { getSharedAssetStore } from "./core/asset-store.js";
+import { mergeEditorBindings } from "./core/gltf-extras.js";
 import { esc } from "./core/util.js";
 import { buildStubConfig } from "./core/stub.js";
 import { CARD_VERSION, API_VERSION, THREE_MODE } from "./core/constants.js";
@@ -36,6 +38,11 @@ export class ThreeDModelCardEditor extends HTMLElement {
     this._builtin = [];
     this._root = null;
     this._manualEntity = new Set(); // ключи, для которых включён ручной ввод
+    // Файлы моделей в хранилище браузера (T-010).
+    this._assetStore = null;   // экземпляр AssetStore или null (нет IndexedDB)
+    this._assets = null;       // список загруженных файлов (null — ещё не читали)
+    this._assetNote = null;    // разовое сообщение в секции файлов
+    this._assetsLoading = false;
   }
 
   // ---- входные данные ------------------------------------------------------
@@ -68,6 +75,7 @@ export class ThreeDModelCardEditor extends HTMLElement {
   connectedCallback() {
     if (!this._root) this._render();
     this._loadBuiltin();
+    this._loadAssets();
   }
 
   // ---- загрузка моделей ----------------------------------------------------
@@ -87,6 +95,8 @@ export class ThreeDModelCardEditor extends HTMLElement {
     if (!id) return;
     if (this._model && this._model.manifest.id === id) return;
     this._modelLoading = true;
+    this._discovering = false;
+    this._extrasNotes = null;
     this._render();
     try {
       this._model = await registry.resolve(id, {
@@ -94,13 +104,212 @@ export class ThreeDModelCardEditor extends HTMLElement {
         allowExternal: this._config.allow_external_models !== false,
       });
       this._modelError = null;
+      // T-012: у модели привязки из extras файла — читаем файл ДО показа
+      // формы (без сцены, без three.js). Нечитаемый файл — предупреждение
+      // в блоке привязок, а не молча пустые поля.
+      if (this._model && typeof this._model.discoverBindings === "function") {
+        this._discovering = true;
+        this._render();
+        let disc = { bindings: [], warnings: [] };
+        try {
+          disc = await this._model.discoverBindings(this._discoverCtx());
+        } catch (e) {
+          disc = { bindings: [], warnings: [e && e.message ? e.message : String(e)] };
+        }
+        this._extrasNotes = (disc.warnings && disc.warnings.length) ? disc.warnings : null;
+        if (disc.bindings && disc.bindings.length) {
+          this._model.bindings = mergeEditorBindings(this._model.bindings, disc.bindings);
+          // Автозаполнение: пометка объявила entity_id, а пользователь
+          // ничего не выбирал — подставляем; его выбор всегда приоритетнее.
+          const cur = Object.assign({}, this._config.entities || {});
+          let changed = false;
+          for (const b of disc.bindings) {
+            if (b.entity && !cur[b.key]) { cur[b.key] = b.entity; changed = true; }
+          }
+          if (changed) this._patch({ entities: cur });
+        }
+      }
     } catch (e) {
       this._model = null;
       this._modelError = e && e.message ? e.message : String(e);
     }
     this._modelLoading = false;
+    this._discovering = false;
     this._render();
     this._refreshStates();
+  }
+
+  /**
+   * T-012: ctx для discoverBindings — тот же контракт, что контекст сцены
+   * (см. src/core/scene.js): asset(), modelAssets, assetFile().
+   */
+  _discoverCtx() {
+    return {
+      asset: (rel) => {
+        const raw = (this._model && this._model._sourceUrl) || "";
+        const base = /^https?:\/\//i.test(raw) || raw.startsWith("/") || raw.startsWith("./")
+          ? raw
+          : (typeof document !== "undefined" ? document.baseURI : undefined);
+        try { return new URL(rel, base).href; } catch (e) { return rel; }
+      },
+      modelAssets: this._config.model_assets || null,
+      assetFile: this._assetStore ? (id) => this._assetStore.objectUrl(id) : undefined,
+      fetch: undefined,
+    };
+  }
+
+  // ---- файлы моделей: хранилище браузера (T-010) ----------------------------
+  //
+  // Пользователь выбирает (или перетаскивает) .glb/.gltf/.obj/.mtl — файл
+  // сохраняется в IndexedDB БРАУЗЕРА, на сервер ничего не уходит. В конфиг
+  // попадает только model_assets: { "имя.файла": "t3d-asset-…" }, а сцена
+  // читает файл по id из того же хранилища.
+
+  /** Прочитать список файлов из хранилища (нет IndexedDB — тихо). */
+  async _loadAssets() {
+    if (this._assetsLoading) return;
+    this._assetsLoading = true;
+    try {
+      const store = getSharedAssetStore();
+      this._assetStore = store;
+      this._assets = store ? await store.list() : null;
+    } catch (e) {
+      this._assets = null;
+    }
+    this._assetsLoading = false;
+    if (this._root) this._render();
+  }
+
+  /**
+   * Сохранить выбранные файлы и прописать их в model_assets.
+   * @param {Array|FileList} fileList
+   */
+  async _uploadFiles(fileList) {
+    const store = this._assetStore || getSharedAssetStore();
+    if (!store) {
+      this._assetNote = "Хранилище браузера (IndexedDB) недоступно — сохранить файлы нельзя.";
+      this._render();
+      return;
+    }
+    this._assetStore = store;
+    // Формат определяется по расширению — берём только поддерживаемые.
+    const files = [];
+    for (const f of fileList || []) {
+      // .json — спецификация модели (T-011): в поле «Модель» пишется
+      // model: asset:<имя>.json, файл в код не превращаем, он данные.
+      if (f && /\.(glb|gltf|obj|mtl|json)$/i.test(String(f.name || ""))) files.push(f);
+    }
+    if (!files.length) {
+      this._assetNote = "Поддерживаются файлы .glb, .gltf, .obj, .mtl и .json (спецификация модели).";
+      this._render();
+      return;
+    }
+    this._assetNote = null;
+    try {
+      const map = Object.assign({}, (this._config && this._config.model_assets) || {});
+      for (const f of files) {
+        const rec = await store.put(f);
+        map[rec.name] = rec.id;
+      }
+      this._assets = await store.list();
+      // reload_model — чтобы карточка пересобрала сцену с новым файлом.
+      this._patch({ model_assets: map, reload_model: true });
+    } catch (e) {
+      this._assetNote = `Не удалось сохранить файлы: ${e.message}`;
+      this._render();
+    }
+  }
+
+  /** Удалить файл из хранилища и убрать все ключи model_assets, что на него указывают. */
+  async _removeAsset(id) {
+    const store = this._assetStore;
+    if (!store) return;
+    try { await store.remove(id); } catch (e) { /* ignore */ }
+    try { this._assets = await store.list(); } catch (e) { this._assets = null; }
+    const map = Object.assign({}, (this._config && this._config.model_assets) || {});
+    let changed = false;
+    for (const k of Object.keys(map)) {
+      if (String(map[k]) === String(id)) { delete map[k]; changed = true; }
+    }
+    if (changed) {
+      this._patch({
+        model_assets: Object.keys(map).length ? map : undefined,
+        reload_model: true,
+      });
+    } else {
+      this._render();
+    }
+  }
+
+  /** Секция «Файлы моделей» в форме редактора. */
+  _assetBlock(c) {
+    const block = el("div", "t3d-ed-block");
+    block.appendChild(el("div", "t3d-ed-h", "Файлы моделей (в браузере)"));
+    block.appendChild(el("div", "t3d-ed-sub",
+      "Файлы сохраняются в хранилище этого браузера (IndexedDB) и НЕ отправляются на сервер. " +
+      "В конфигурации хранится только идентификатор файла; формат определяется по его имени."));
+
+    // Скрытый input + кнопка выбора.
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".glb,.gltf,.obj,.mtl,.json";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.addEventListener("change", () => {
+      this._uploadFiles(fileInput.files || []);
+      fileInput.value = "";
+    });
+    block.appendChild(fileInput);
+
+    const pickBtn = document.createElement("button");
+    pickBtn.className = "t3d-ed-btn";
+    pickBtn.type = "button";
+    pickBtn.textContent = "Выбрать файлы…";
+    pickBtn.addEventListener("click", () => { if (fileInput.click) fileInput.click(); });
+    block.appendChild(pickBtn);
+
+    // Зона drag&drop.
+    const drop = el("div", "t3d-ed-drop",
+      "…или перетащите сюда файлы .glb / .gltf / .obj / .mtl / .json (спека модели)");
+    drop.addEventListener("dragover", (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); });
+    drop.addEventListener("drop", (ev) => {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      const files = (ev && ev.dataTransfer && ev.dataTransfer.files) || [];
+      this._uploadFiles(files);
+    });
+    block.appendChild(drop);
+
+    if (this._assetNote) block.appendChild(el("div", "t3d-ed-note t3d-ed-warn", this._assetNote));
+
+    // Список сохранённых файлов.
+    const list = this._assets || [];
+    if (this._assetStore && !list.length) {
+      block.appendChild(el("div", "t3d-ed-note", "Сохранённых файлов пока нет."));
+    }
+    for (const rec of list) {
+      const row = el("div", "t3d-ed-asset");
+      row.appendChild(el("div", "t3d-ed-asset-info", `${rec.name} · ${formatSize(rec.size)}`));
+      const rm = document.createElement("button");
+      rm.className = "t3d-ed-btn t3d-ed-btn-sm";
+      rm.type = "button";
+      rm.textContent = "Удалить";
+      rm.addEventListener("click", () => this._removeAsset(rec.id));
+      row.appendChild(rm);
+      block.appendChild(row);
+    }
+
+    // Файл в конфигурации, которого нет в хранилище этого браузера (T-010):
+    // тот же текст, что в диагностике карточки.
+    if (this._assets !== null && c && c.model_assets && typeof c.model_assets === "object") {
+      const ids = new Set(list.map((a) => String(a.id)));
+      for (const [key, id] of Object.entries(c.model_assets)) {
+        if (!ids.has(String(id))) {
+          block.appendChild(el("div", "t3d-ed-note t3d-ed-error",
+            `Файл модели «${key}» загружен в другом браузере — загрузите его снова в редакторе`));
+        }
+      }
+    }
+    return block;
   }
 
   // ---- рендер --------------------------------------------------------------
@@ -195,7 +404,8 @@ export class ThreeDModelCardEditor extends HTMLElement {
     }
 
     if (this._modelLoading) {
-      modelBlock.appendChild(el("div", "t3d-ed-note", "Загрузка модели…"));
+      modelBlock.appendChild(el("div", "t3d-ed-note",
+        this._discovering ? "Модель загружена — читаю привязки из файла модели…" : "Загрузка модели…"));
     } else if (this._modelError) {
       modelBlock.appendChild(el("div", "t3d-ed-note t3d-ed-error", `Не удалось загрузить модель: ${this._modelError}`));
     } else if (this._model) {
@@ -204,6 +414,9 @@ export class ThreeDModelCardEditor extends HTMLElement {
         `${m.name} · ${m.id} · API v${m.apiVersion}${m.description ? " · " + m.description : ""}`));
     }
     root.appendChild(modelBlock);
+
+    // --- файлы моделей в хранилище браузера (T-010) ---
+    root.appendChild(this._assetBlock(c));
 
     // --- общие настройки ---
     const baseBlock = el("div", "t3d-ed-block");
@@ -250,6 +463,12 @@ export class ThreeDModelCardEditor extends HTMLElement {
       for (const g of groups) {
         if (g.name) bindBlock.appendChild(el("div", "t3d-ed-group", g.name));
         for (const b of g.items) bindBlock.appendChild(this._bindingRow(b));
+      }
+
+      // T-012: замечания о привязках из extras файла модели (неизвестные
+      // действия, пометки без действий, проблемы с чтением файла).
+      for (const w of this._extrasNotes || []) {
+        bindBlock.appendChild(el("div", "t3d-ed-note", w));
       }
 
       // Внешний вид камеры/окружения — только если модель это поддерживает
@@ -682,6 +901,14 @@ function shortUrl(v) {
   return s.length > 34 ? "…" + s.slice(-33) : s;
 }
 
+/** Человекочитаемый размер файла для списка загруженных моделей. */
+function formatSize(n) {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
+  return `${(n / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
 function partialMatch(value, needles) {
   const s = String(value).toLowerCase();
   return needles.some((n) => s.includes(String(n).toLowerCase()));
@@ -735,6 +962,14 @@ const EDITOR_CSS = `
 .t3d-ed-details summary { cursor: pointer; font-size: 12px; opacity: .8; margin-bottom: 8px; }
 .t3d-ed-grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
 @media (max-width: 520px) { .t3d-ed-grid3 { grid-template-columns: 1fr 1fr; } }
+/* Файлы моделей в браузере (T-010) */
+.t3d-ed-drop { border: 1px dashed var(--divider-color, rgba(130,150,180,.45)); border-radius: 8px;
+  padding: 10px 8px; text-align: center; font-size: 11.5px; opacity: .7; }
+.t3d-ed-asset { display: flex; align-items: center; gap: 8px; }
+.t3d-ed-asset-info { flex: 1; font-size: 11.5px;
+  font-family: var(--code-font-family, ui-monospace, Consolas, monospace);
+  word-break: break-all; opacity: .85; }
+.t3d-ed-btn-sm { font-size: 11px; padding: 3px 9px; flex: 0 0 auto; }
 `;
 
 export default ThreeDModelCardEditor;

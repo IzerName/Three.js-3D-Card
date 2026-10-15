@@ -26,6 +26,7 @@
 
 import { loadThree, threeSync } from "./core/three-loader.js";
 import { SceneEngine } from "./core/scene.js";
+import { getSharedAssetStore } from "./core/asset-store.js";
 import { registry, defineModel, builtinIds, absoluteUrl } from "./core/registry.js";
 import { createObjectModel } from "./core/object-model.js";
 import {
@@ -105,8 +106,11 @@ class ThreeDModelCard extends HTMLElement {
     }
     const modelId = config.model || config.model_id || legacyModelId(config) || "water-tank";
     const next = Object.assign({}, config, { model: modelId });
+    // Смена файлов в model_assets (загрузка/удаление в редакторе) — тоже
+    // повод пересобрать сцену: геометрия теперь берётся из браузера.
     const changedModel = !this._config || this._config.model !== next.model
-      || this._config.model_url !== next.model_url;
+      || this._config.model_url !== next.model_url
+      || !modelAssetsEqual(this._config.model_assets, next.model_assets);
 
     // Совместимость: старый вид конфигурации с одним ключом entities
     if (config.entities && typeof config.entities === "object") {
@@ -262,6 +266,9 @@ class ThreeDModelCard extends HTMLElement {
       const engine = new SceneEngine(root, this._config, model, {
         THREE,
         hass: this._hass,
+        // Хранилище файлов моделей в браузере (T-010): общий экземпляр
+        // на страницу, пишется редактором, читается сценой.
+        assetStore: getSharedAssetStore(),
         onService: (domain, service, data) => {
           if (this._hass && this._hass.callService) this._hass.callService(domain, service, data || {});
         },
@@ -349,6 +356,17 @@ function legacyModelId(config) {
     "custom:production-room-3d-card": "production-room",
   };
   return map[type] || null;
+}
+
+/** Сравнить model_assets (ключ → id): любое отличие — повод пересобрать сцену. */
+function modelAssetsEqual(a, b) {
+  const ka = a && typeof a === "object" ? Object.keys(a) : [];
+  const kb = b && typeof b === "object" ? Object.keys(b) : [];
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (String((b && typeof b === "object" ? b[k] : undefined) ?? "") !== String(a[k] ?? "")) return false;
+  }
+  return true;
 }
 
 api.CardClass = ThreeDModelCard;
