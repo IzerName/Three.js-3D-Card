@@ -237,7 +237,7 @@ let config = {
   type: "custom:threejs-3d-card",
   model: new URLSearchParams(location.search).get("model") || "water-tank",
   title: "Бак чистой воды · стенд",
-  height: 420,
+  // height не задаём: карточка занимает высоту, заданную ей CSS стенда.
   entities: {
     level: ENTITIES.level,
     liters: ENTITIES.liters,

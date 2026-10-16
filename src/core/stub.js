@@ -22,8 +22,11 @@ export function buildStubConfig(model, hass, entities) {
 
   const out = { type: "custom:threejs-3d-card", model: manifest.id };
   if (defaults.title) out.title = defaults.title;
-  const h = defaults.height || (manifest.size && manifest.size.defaultHeight);
-  if (h) out.height = h;
+  // Фиксированную высоту не подставляем: без `height` карточка занимает всю
+  // доступную область (в разделе — клетку сетки), а до раскладки Lovelace
+  // резервирует место по getCardSize()/getGridOptions() карточки. Только если
+  // модель сама объявила высоту в defaults.config.height — уважаем её выбор.
+  if (Number.isFinite(defaults.height) && defaults.height > 0) out.height = defaults.height;
 
   const states = hass && hass.states;
   const candidates = entities && typeof entities === "object" && !Array.isArray(entities)

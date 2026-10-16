@@ -28,7 +28,7 @@
       { key: "color", name: "Цвет", type: "theme-color", default: "var(--primary-color)" },
     ],
 
-    defaults: { config: { title: "Внешняя модель", height: 300 } },
+    defaults: { config: { title: "Внешняя модель" } },
 
     create(ctx) {
       // three.js всегда доступен через контекст — брать его на верхнем уровне файла нельзя

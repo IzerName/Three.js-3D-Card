@@ -1,0 +1,58 @@
+{
+  "manifest": {
+    "id": "hinged-door-demo",
+    "name": "Дверь, вентилятор, лампа (GLB)",
+    "description": "Образец структуры glTF/GLB: узел на объект, у каждого узла свой translation и локальные вершины. Сгенерирован skills/threejs-3d-model/scripts/make-example-glb.mjs",
+    "environment": { "floor": "radial", "shadows": true },
+    "camera": { "target": [-0.6, 1.2, -1], "radius": 7.5, "phi": 1.1, "theta": 0.65 },
+    "size": { "defaultHeight": 560 }
+  },
+
+  "source": {
+    "format": "gltf",
+    "url": "/local/3d/hinged-door.glb"
+  },
+
+  "groups": {
+    "lamps": ["Lamp_*"]
+  },
+
+  "bindings": [
+    {
+      "entity": "light.corridor",
+      "target": "@lamps",
+      "name": "Основной свет",
+      "group": "Освещение",
+      "colors": { "on": "#ffd9a0", "off": "#3a3a3a" },
+      "light": { "lumens": 900, "color": "#ffd9a0", "distance": 10, "castShadow": true }
+    },
+    {
+      "entity": "binary_sensor.front_door",
+      "target": "Door_Leaf",
+      "name": "Входная дверь (сдвиг)",
+      "group": "Двери и окна",
+      "door": { "slide": true, "axis": "x", "span": 0.9, "open": ["on", "open"] }
+    },
+    {
+      "entity": "fan.bathroom",
+      "target": "Fan_Bathroom",
+      "name": "Вытяжка в санузле",
+      "group": "Климат",
+      "rotate": { "axis": "z", "round_per_second": 3, "on": ["on"] }
+    },
+    {
+      "entity": "sensor.room_temperature",
+      "target": "Sensor_Panel",
+      "name": "Температура",
+      "group": "Климат",
+      "colors": { "<18": "#3aa0ff", ">=18": "#3ad07a", ">=26": "#ff8c00", ">=30": "#e53935" }
+    }
+  ],
+
+  "entityConfig": {
+    "light.corridor": { "name": "Свет в коридоре", "kind": "brightness", "hint": "Учитывается яркость" },
+    "binary_sensor.front_door": { "name": "Датчик входной двери", "kind": "boolean" },
+    "fan.bathroom": { "name": "Вентилятор", "kind": "boolean" },
+    "sensor.room_temperature": { "name": "Температура, °C", "kind": "number" }
+  }
+}

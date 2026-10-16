@@ -1,0 +1,130 @@
+<!doctype html>
+<!--
+  Проверка UI карточки в настоящем браузере: занимает ли карточка высоту
+  родителя и сохраняется ли фокус в редакторе при эхе конфигурации от HA.
+
+  Запуск (два терминала, из корня репозитория):
+    npm run build
+    npm run serve                 # http://localhost:8099
+    node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-ui-height-focus.html 9000
+
+  Страница печатает ✔/✖ и «ИТОГ: …». В браузере нужен WebGL (swiftshader
+  подходит: probe-runner запускает Chrome с --use-angle=swiftshader).
+-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>threejs-3d-card — проверка UI (высота карточки и фокус в редакторе)</title>
+<style>
+  html, body { margin: 0; padding: 12px; background: #0d1117; color: #dfe6ef;
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #box { width: 640px; height: 480px; margin-bottom: 10px; border: 1px solid #30363d; }
+  #masonry { width: 360px; margin-bottom: 10px; border: 1px solid #30363d; }
+  #edhost { width: 520px; border: 1px solid #30363d; padding: 8px; }
+  threejs-3d-card { display: block; width: 100%; }
+  #log div { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<div id="box"><threejs-3d-card id="card1"></threejs-3d-card></div>
+<div id="masonry"><threejs-3d-card id="card2"></threejs-3d-card></div>
+<div id="edhost"></div>
+
+<script type="module">
+// Проверка того, что нельзя проверить заглушками DOM: реальная раскладка
+// (занимает ли карточка высоту родителя) и реальный фокус в редакторе.
+const log = [];
+const ok = (cond, msg) => log.push(`${cond ? "✔" : "✖"} ${msg}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (fn, ms = 4000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    try { if (fn()) return true; } catch (e) { /* ещё не готово */ }
+    await sleep(50);
+  }
+  return false;
+};
+window.onerror = (e) => { log.push(`✖ ошибка JS: ${e}`); };
+
+try {
+  await import("/threejs-3d-card.js");
+  const hass = { states: {}, callService() {} };
+
+  // --- 1. Контейнер задаёт высоту: карточка занимает её целиком -------------
+  const card1 = document.getElementById("card1");
+  card1.hass = hass;
+  card1.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+  await waitFor(() => card1._engine && card1._root);
+  await sleep(300);
+  const root1 = card1._root;
+  const canvas1 = root1.querySelector("canvas");
+  ok(Math.abs(root1.clientHeight - 480) <= 2,
+    `карточка занимает высоту контейнера: ${root1.clientHeight} px (ожидалось ~480)`);
+  ok(canvas1 && Math.abs(canvas1.clientHeight - 480) <= 2,
+    `канвас растянут по карточке: ${canvas1 ? canvas1.clientHeight : "нет канваса"} px`);
+  ok(root1.style.height === "100%", `высота задана как 100%: «${root1.style.height}»`);
+
+  // --- 2. Контейнер высоты не задаёт («кирпичная» раскладка) ---------------
+  const card2 = document.getElementById("card2");
+  card2.hass = hass;
+  card2.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+  await waitFor(() => card2._engine && card2._root);
+  await sleep(400);
+  const h2 = card2._root.clientHeight;
+  ok(h2 >= 380 && h2 <= 420,
+    `без высоты родителя карточка получила рекомендованные моделью ${h2} px (ожидалось ~400)`);
+
+  // --- 3. Смена «Высота, px» не пересобирает сцену -------------------------
+  const engineBefore = card1._engine;
+  card1.setConfig({ type: "custom:threejs-3d-card", model: "water-tank", height: 300 });
+  await sleep(200);
+  ok(card1._engine === engineBefore, "смена height не пересоздала сцену");
+  ok(Math.abs(card1._root.clientHeight - 300) <= 2,
+    `карточка приняла фиксированную высоту: ${card1._root.clientHeight} px`);
+
+  // --- 4. Редактор: фокус переживает эхо конфигурации (как в HA) -----------
+  const editor = document.createElement("threejs-3d-card-editor");
+  editor.hass = hass;
+  document.getElementById("edhost").appendChild(editor);
+  editor.setConfig({ type: "custom:threejs-3d-card", model: "water-tank", title: "Бак" });
+  await waitFor(() => editor._root && editor._model);
+  await sleep(150);
+
+  const shadow = editor.shadowRoot;
+  const titleInput = [...shadow.querySelectorAll("input")].find((i) => i.type === "text" && i.value === "Бак");
+  ok(!!titleInput, "поле заголовка найдено в форме редактора");
+  if (titleInput) {
+    titleInput.focus();
+    titleInput.value = "Ба";
+    titleInput.dispatchEvent(new Event("input", { bubbles: true }));
+    // HA отдаёт редактору его же конфиг: hui-element-editor → value → setConfig.
+    editor.setConfig(Object.assign({}, editor.config));
+    await sleep(30);
+    ok(shadow.activeElement === titleInput, "фокус сохранён после эха конфигурации");
+    ok(titleInput.isConnected, "поле не выброшено из формы (иначе ввод срывается)");
+    ok(titleInput.value === "Ба", `в поле остался введённый текст: «${titleInput.value}»`);
+
+    // Первый символ + эхо ещё раз — как при обычном наборе текста.
+    titleInput.value = "Бак ";
+    titleInput.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.setConfig(Object.assign({}, editor.config));
+    await sleep(30);
+    ok(shadow.activeElement === titleInput, "фокус сохранён и после второго символа");
+
+    // Настоящее изменение конфигурации форму обновляет.
+    editor.setConfig(Object.assign({}, editor.config, { title: "Другой" }));
+    await sleep(30);
+    ok([...shadow.querySelectorAll("input")].some((i) => i.value === "Другой"),
+      "изменённый конфиг обновил форму");
+  }
+} catch (e) {
+  log.push(`✖ исключение: ${e && e.message ? e.message : e}`);
+}
+
+log.push(problems() ? "ИТОГ: ЕСТЬ ПРОБЛЕМЫ" : "ИТОГ: всё в порядке");
+function problems() { return log.some((l) => l.startsWith("✖")); }
+document.getElementById("log").innerHTML = log.map((l) => `<div>${l}</div>`).join("");
+</script>
+</body>
+</html>

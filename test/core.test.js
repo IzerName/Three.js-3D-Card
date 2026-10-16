@@ -193,9 +193,21 @@ test("buildStubConfig: собирает валидную конфигураци�
   assert.equal(stub.type, "custom:threejs-3d-card");
   assert.equal(stub.model, "water-tank");
   assert.equal(stub.title, "Бак");
-  assert.equal(stub.height, 400);
+  // Фиксированную высоту не подставляем: без `height` карточка занимает всю
+  // доступную область, а рекомендацию модели отдаёт manifest.size.defaultHeight
+  // (её использует getCardSize()/getGridOptions() карточки).
+  assert.equal(stub.height, undefined, "в конфигурации по умолчанию не должно быть фиксированной высоты");
   assert.equal(stub.entities.level, "sensor.water_level");
   assert.equal(stub.params.full_value, 100);
+});
+
+test("buildStubConfig: явная высота модели уважается", () => {
+  const model = {
+    manifest: { id: "water-tank" },
+    bindings: [],
+    defaults: { config: { title: "Бак", height: 420 } },
+  };
+  assert.equal(buildStubConfig(model, {}).height, 420);
 });
 
 // ---- утилиты ----------------------------------------------------------------

@@ -440,3 +440,46 @@ test("dispose убирает подписи и источники света", (
   engine.dispose();
   assert.ok(m.root.children.length <= before);
 });
+
+test("петля: перенос геометрии не портит общую геометрию из кэша", async () => {
+  // Загрузчик отдаёт каждой сцене клон дерева, но геометрия в клоне общая
+  // (geometry.js → cloneObject). Перенос в prepareHinge необратим, поэтому
+  // правило обязано работать со своей копией: иначе при каждой пересборке
+  // сцены (переподключение карточки, правка конфигурации в редакторе) створка
+  // уезжала бы ещё раз — «части модели съезжают».
+  const THREE_REAL = await import("three");
+  const ctx = makeCtx();
+  ctx.THREE = THREE_REAL;
+
+  const source = new THREE_REAL.Mesh(
+    new THREE_REAL.BoxGeometry(1, 2, 0.1),
+    new THREE_REAL.MeshStandardMaterial(),
+  );
+  source.name = "Door_Front";
+  source.position.set(2, 0, 0);
+  const before = Array.from(source.geometry.attributes.position.array);
+
+  const spec = {
+    bindings: [{
+      entity: "binary_sensor.door",
+      target: "Door_Front",
+      door: { hinge: "left", degrees: 90, open: ["on"] },
+    }],
+  };
+
+  const roots = [];
+  for (let i = 0; i < 3; i++) {
+    const root = new THREE_REAL.Group();
+    const clone = source.clone();          // геометрия — та же (как из кэша)
+    root.add(clone);
+    roots.push(root);
+    createRuleEngine(spec, ctx, root);
+  }
+
+  assert.deepEqual(
+    Array.from(source.geometry.attributes.position.array), before,
+    "геометрия из кэша изменена: при каждой пересборке сцены створка уезжала бы снова",
+  );
+  assert.notEqual(roots[0].children[0].geometry, source.geometry,
+    "перенос должен идти по собственной копии геометрии");
+});

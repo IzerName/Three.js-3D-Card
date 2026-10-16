@@ -15,6 +15,15 @@ import { getPath } from "../../src/core/util.js";
 const PARAM_DEFAULTS = { width: 12, depth: 8, height: 3.2 };
 
 /**
+ * Плоский (старый) формат конфигурации карточки: размеры помещения прямо в
+ * корне. Ключ `height` в современной карточке занят высотой в ПИКСЕЛЯХ
+ * (Lovelace, поле «Высота, px»), поэтому метрами считаем только значение,
+ * которое на метры похоже: 40 м — заведомо больше любого помещения и заведомо
+ * меньше любой высоты карточки (минимум 120 px).
+ */
+const LEGACY_FLAT_MAX_M = 40;
+
+/**
  * Конфигурация legacy-движка из конфигурации карточки.
  * Поддерживает оба вида: новый (params) и старый (плоские width/depth/height).
  */
@@ -24,7 +33,7 @@ export function legacyConfigFrom(cardConfig) {
   const num = (key) => {
     const v = getPath(params, key, undefined);
     if (Number.isFinite(v)) return v;
-    if (Number.isFinite(cfg[key])) return cfg[key];
+    if (Number.isFinite(cfg[key]) && cfg[key] <= LEGACY_FLAT_MAX_M) return cfg[key];
     return PARAM_DEFAULTS[key];
   };  return Object.assign({}, cfg, {
     title: cfg.title || "Производственное помещение",

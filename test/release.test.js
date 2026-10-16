@@ -109,3 +109,119 @@ test("карточка: getCardSize зависит от высоты", () => {
   card.setConfig({ type: "custom:threejs-3d-card", model: "water-tank", height: 500 });
   assert.equal(card.getCardSize(), 10);
 });
+
+test("карточка: без height — авто-высота на доступную область", () => {
+  const CardClass = customElements.get("threejs-3d-card");
+  const card = new CardClass();
+  card.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+  assert.equal(card._heightPx(), null, "высота не задана — карточка занимает доступную область");
+  // Пока модель не загружена, Lovelace резервирует место по общей рекомендации
+  // (360 px), а после загрузки — по manifest.size.defaultHeight модели.
+  assert.equal(card.getCardSize(), 7);
+  card._model = { manifest: { size: { defaultHeight: 400 } } };
+  assert.equal(card.getCardSize(), 8);
+  delete card._model;
+  const grid = card.getGridOptions();
+  assert.equal(grid.columns, 12, "в разделе карточка занимает всю ширину");
+  assert.ok(grid.rows >= 3, "в разделе клетка задаёт высоту — карточка её занимает");
+});
+
+test("карточка: авто-высота не пересобирает сцену при смене height", () => {
+  const CardClass = customElements.get("threejs-3d-card");
+  const card = new CardClass();
+  card.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+  let applied = 0;
+  let rebuilt = 0;
+  card._engine = {
+    applyConfig() { applied++; },
+    setDiagnosticsVisible() {},
+  };
+  card._rebuild = () => { rebuilt++; };
+  card.setConfig({ type: "custom:threejs-3d-card", model: "water-tank", height: 480 });
+  assert.equal(rebuilt, 0, "смена высоты не должна пересобирать сцену");
+  assert.equal(applied, 1, "высота применяется через applyConfig");
+  assert.equal(card._heightPx(), 480);
+});
+
+test("карточка: авто-высота растягивается, а без высоты родителя берёт рекомендованную", async () => {
+  const CardClass = customElements.get("threejs-3d-card");
+  const card = new CardClass();
+  card.setConfig({ type: "custom:threejs-3d-card", model: "water-tank" });
+  card._model = { manifest: { size: { defaultHeight: 400 } } };
+
+  // Родитель задал высоту (клетка раздела, панельный вид): растягиваемся.
+  const root = { clientHeight: 500, style: { height: "", minHeight: "" }, parentNode: null };
+  card._root = root;
+  card._engine = null;
+  card._applyHeight();
+  assert.equal(root.style.height, "100%");
+  assert.equal(card._autoFilled, undefined);
+
+  // Родитель высоты не задал («кирпичная» раскладка): после раскладки
+  // подставляем рекомендованную моделью высоту, иначе карточка — полоска.
+  root.clientHeight = 120;
+  card._applyHeight();
+  assert.equal(root.style.height, "100%", "до замера растягиваемся");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(card._autoFilled, true, "высота не задана родителем — берём рекомендацию модели");
+  assert.equal(root.style.height, "400px");
+  assert.equal(root.style.minHeight, "120px");
+});
+
+test("карточка: вид камеры переживает пересборку сцены", () => {
+  const CardClass = customElements.get("threejs-3d-card");
+  const cfg = { type: "custom:threejs-3d-card", model: "water-tank" };
+
+  // Первая сцена: пользователь повернул модель, карточку пересоздали
+  // (Lovelace делает это в окне предпросмотра на каждое изменение конфигурации).
+  const first = new CardClass();
+  first.setConfig(cfg);
+  const view = { target: [1, 2, 3], radius: 7, phi: 1.1, theta: 0.5 };
+  first._engine = { getView: () => view, dispose() {}, disposeDom() {} };
+  first._root = { parentNode: { removeChild() {} } };
+  first.disconnectedCallback();
+
+  // Новая сцена сразу после пересборки — вид возвращается.
+  const second = new CardClass();
+  second.setConfig(cfg);
+  const applied = [];
+  second._restoreView({ setView: (v) => { applied.push(v); return true; } });
+  assert.equal(applied.length, 1, "вид камеры не восстановлен");
+  assert.deepEqual(applied[0].target, [1, 2, 3]);
+  assert.equal(applied[0].radius, 7);
+
+  // Другая модель — чужой вид не подставляем.
+  const third = new CardClass();
+  third.setConfig({ type: "custom:threejs-3d-card", model: "production-room" });
+  const other = [];
+  third._restoreView({ setView: (v) => { other.push(v); return true; } });
+  assert.equal(other.length, 0, "вид от другой модели применяться не должен");
+});
+
+test("редактор: эхо конфигурации не перерисовывает форму (фокус сохраняется)", async () => {
+  const EditorClass = customElements.get("threejs-3d-card-editor");
+  const editor = new EditorClass();
+  // В браузере элемент подключён; заглушка DOM про isConnected не знает.
+  Object.defineProperty(editor, "isConnected", { value: true, configurable: true });
+
+  const cfg = { type: "custom:threejs-3d-card", model: "water-tank", title: "Бак", height: 420 };
+  editor.setConfig(cfg);
+  await new Promise((r) => setTimeout(r, 50));   // ленивая загрузка модели
+  const block = editor._root.children[0];
+
+  // 1. HA возвращает редактору его же конфиг (hui-element-editor так делает
+  //    после каждого config-changed) — форма должна остаться той же: иначе
+  //    innerHTML = "" уничтожает поле вместе с фокусом после первого символа.
+  editor.setConfig(Object.assign({}, cfg));
+  assert.equal(editor._root.children[0], block, "форма перерисована на эхо конфигурации");
+
+  // 2. Пользователь печатает символ: _patch отправляет конфиг, HA отвечает тем
+  //    же конфигом — форма по-прежнему не перерисовывается.
+  editor._patch({ title: "Ба" });
+  editor.setConfig(Object.assign({}, editor.config));
+  assert.equal(editor._root.children[0], block, "форма перерисована после ввода символа");
+
+  // 3. Настоящее изменение (например, правка YAML) форму обновляет.
+  editor.setConfig(Object.assign({}, editor.config, { title: "Другой заголовок" }));
+  assert.notEqual(editor._root.children[0], block, "изменённый конфиг должен обновить форму");
+});

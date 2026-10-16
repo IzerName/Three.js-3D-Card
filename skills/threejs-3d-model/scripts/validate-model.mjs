@@ -184,10 +184,10 @@ function validate(spec, file) {
         }
       }
 
-      const hasShort = ["colors", "color", "hide", "light", "rotate", "door", "text"].some((k) => b[k] !== undefined);
+      const hasShort = ["colors", "color", "hide", "light", "rotate", "door", "text", "scale"].some((k) => b[k] !== undefined);
       const hasFull = Array.isArray(b.actions) && b.actions.length > 0;
       if (!hasShort && !hasFull) {
-        W(`${at}: нет ни одного действия (colors/hide/light/rotate/door/text или actions) — привязка ничего не делает`);
+        W(`${at}: нет ни одного действия (colors/scale/hide/light/rotate/door/text или actions) — привязка ничего не делает`);
       }
       if (hasShort && hasFull) W(`${at}: смешаны краткая запись и actions — поддерживаются обе, но лучше выбрать одну`);
 
