@@ -3,11 +3,14 @@ name: Release
 # Сборка релиза threejs-3d-card.
 #
 # Запускается по тегу vX.Y.Z: собирает dist/ (three.js + ядро + модели),
-# прогоняет тесты и прикладывает архив к GitHub-релизу.
-# HACS ставит плагин из архива репозитория на теге: файла threejs-3d-card.js
-# в корне нет, поэтому HACS находит его в dist/ и забирает содержимое dist/
-# целиком в config/www/community/<имя-репозитория>/. Значит dist/ обязан быть
-# закоммичен, и сборка не должна от него отличаться — это проверяется ниже.
+# прогоняет тесты и публикует GitHub-релиз **без файловых ассетов**.
+# HACS (категория plugin) ставит корневой threejs-3d-card.js из дерева тега
+# (файл выбирает `filename` в `hacs.json`). Файловых ассетов в релизе быть
+# не должно: если у релиза есть хотя бы один ассет, HACS скачает все ассеты
+# тега и положит их как есть в config/www/community/<имя-репозитория>/
+# (zip не распаковывает), в дерево тега при этом не заглядывая.
+# dist/ остаётся закоммиченным для дев-стенда, и сборка не должна от него
+# отличаться — это проверяется ниже.
 on:
   push:
     tags:
@@ -42,8 +45,8 @@ jobs:
       - name: Закоммиченный релиз не устарел
         run: |
           # HACS ставит то, что лежит в репозитории на теге: однофайловую сборку
-          # threejs-3d-card.js из корня (её выбирает hacs.json → filename) и
-          # раскладку dist/ (дев-стенд и архив для ручной установки).
+          # threejs-3d-card.js из корня (её выбирает hacs.json → filename);
+          # dist/ — дев-стенд.
           # Если сборка расходится с закоммиченным, релиз уедет со старым кодом.
           if ! git diff --exit-code -- dist threejs-3d-card.js; then
             echo "::error::dist/ или threejs-3d-card.js расходятся со сборкой — выполните npm run build и закоммитьте"
@@ -81,19 +84,12 @@ jobs:
           ls -la threejs-3d-card.js
           find dist -type f | sort
 
-      - name: Архив для установки вручную
-        run: |
-          cd dist
-          zip -r ../threejs-3d-card.zip . -x '.*'
-
       - name: Публикация релиза
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: threejs-3d-card.zip
           generate_release_notes: true
           body_path: CHANGELOG.md
-          fail_on_unmatched_files: true
 
       - name: Артефакт сборки (для ручного запуска)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

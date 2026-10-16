@@ -9,7 +9,7 @@
 export const API_VERSION = 1;
 
 /** Версия продукта (карточки). Отображается в редакторе. */
-export const CARD_VERSION = "0.1.2";
+export const CARD_VERSION = "0.1.3";
 
 /** Имя кастомного элемента карточки. */
 export const CARD_TAG = "threejs-3d-card";

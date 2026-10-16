@@ -90,12 +90,12 @@
 
 ### Вариант 2 — вручную
 
-1. Возьмите из [релиза](https://github.com/IzerName/Three.js-3D-Card/releases)
-   архив `threejs-3d-card.zip` (это содержимое `dist/` — та же карточка
-   обычными ES-модулями) и распакуйте **всё** в
-   `config/www/threejs-3d-card/`. Имя папки может быть любым; важно сохранить
-   структуру: рядом с `threejs-3d-card.js` должны лежать каталоги `src/`,
-   `models/` и `vendor/`.
+1. Возьмите однофайловый `threejs-3d-card.js` из тега —
+   [релиз v0.1.3](https://github.com/IzerName/Three.js-3D-Card/releases/tag/v0.1.3)
+   (или [исходник файла](https://github.com/IzerName/Three.js-3D-Card/blob/v0.1.3/threejs-3d-card.js)
+   на теге) и положите его в `config/www/threejs-3d-card/`. Имя папки может быть
+   любым: однофайловая сборка самодостаточна, рядом не нужны ни `src/`, ни
+   `models/`, ни `vendor/`.
 2. *Настройки → Панели → ⋮ → Ресурсы → Добавить*:
    ```
    URL:  /local/threejs-3d-card/threejs-3d-card.js
@@ -272,7 +272,7 @@ reload_model: true      # принудительно перечитать фай
 npm install          # three.js, terser, esbuild
 npm run build        # собрать dist/ и однофайловый threejs-3d-card.js в корне
 npm run serve        # локальный стенд: http://localhost:8099/dev/harness.html
-npm test             # юнит- и интеграционные тесты (101 проверка)
+npm test             # юнит- и интеграционные тесты (185)
 npm run check        # сборка + тесты
 npm run watch        # пересборка при изменении src/ и models/
 ```
@@ -313,11 +313,12 @@ node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-obj.html 30000
 
 * `threejs-3d-card.js` в корне репозитория — **однофайловая сборка** (esbuild):
   внутри three.js r160, загрузчики OBJ/MTL/glTF, ядро карточки и встроенные
-  модели, около 911 КБ. Именно её ставит HACS;
+  модели, около 951 КБ. Именно её ставит HACS;
 * `dist/` — та же карточка обычными ES-модулями (`dist/threejs-3d-card.js` +
-  `src/`, `models/`, `vendor/`). Её отдаёт стенд, и она же уходит в архив
-  `threejs-3d-card.zip` для ручной установки. Бандлер здесь не нужен: исходники
-  видны в браузере как есть, с именами файлов и строками.
+  `src/`, `models/`, `vendor/`). Её отдаёт стенд (`npm run serve`); раскладка
+  закоммичена в репозиторий, и CI сверяет её с результатом сборки. Бандлер
+  здесь не нужен: исходники видны в браузере как есть, с именами файлов и
+  строками.
 
 ### Выпуск релиза
 
@@ -330,8 +331,8 @@ node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-obj.html 30000
    ([.github/workflows/release.yml](.github/workflows/release.yml)) прогонит
    тесты, пересоберёт обе раскладки, проверит, что закоммиченные `dist/` и
    бандл совпадают со сборкой (`git diff --exit-code -- dist threejs-3d-card.js`),
-   и приложит `threejs-3d-card.zip` к
-   [релизу](https://github.com/IzerName/Three.js-3D-Card/releases).
+   и опубликует GitHub-релиз **без файловых ассетов**: HACS скачает
+   `threejs-3d-card.js` из дерева тега.
 4. HACS увидит новый релиз и предложит обновление; ресурс переустанавливать не
    нужно — HACS обновляет отметку `?hacstag=…` сам.
 
@@ -343,7 +344,7 @@ node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-obj.html 30000
 
 | Симптом | Что делать |
 |---|---|
-| «Не удалось загрузить three.js» | В однофайловой сборке three.js внутри файла — проверьте, что ресурс указывает на целый `threejs-3d-card.js`. При установке из архива `dist/` проверьте, что каталог `vendor/` распакован рядом с карточкой. Либо разрешите доступ к `cdn.jsdelivr.net` (карточка пробует CDN как резерв). |
+| «Не удалось загрузить three.js» | В однофайловой сборке three.js внутри файла — проверьте, что ресурс указывает на целый `threejs-3d-card.js` (не обрезанный и не чужой файл). Либо разрешите доступ к `cdn.jsdelivr.net` (карточка пробует CDN как резерв). |
 | «Модель … не найдена» | Проверьте id модели в редакторе; для своей модели — путь `/local/3d-models/…`. |
 | «Модель … не вызвала defineModel(…)» | Файл модели не является моделью threejs-3d-card или упал до вызова `defineModel`. Откройте консоль браузера (F12). |
 | `NotSupportedError: Shadow root cannot be created…` | Так падала версия 0.1.0 при переподключении элемента Lovelace — в 0.1.1 исправлено: обновите файл карточки и страницу (Ctrl+F5). |
@@ -381,7 +382,7 @@ threejs-3d-card/
 ├─ hacs.json                    манифест HACS (filename: threejs-3d-card.js)
 ├─ threejs-3d-card.js           однофайловая сборка — коммитится, её ставит HACS
 ├─ package.json                 сборка, тесты, локальный стенд
-├─ dist/                        раскладка из ES-модулей: стенд и ручная установка
+├─ dist/                        раскладка из ES-модулей: дев-стенд
 │  ├─ threejs-3d-card.js        точка входа (ресурс Lovelace)
 │  ├─ src/  models/             ядро и модели — то же, что в исходниках
 │  └─ vendor/                   three.js r160 + загрузчики OBJ/MTL/glTF
@@ -415,15 +416,14 @@ threejs-3d-card/
 ├─ scripts/
 │  ├─ build.mjs                 сборка: dist/ и корневой threejs-3d-card.js
 │  └─ serve.mjs                 локальный HTTP-сервер
-└─ test/                        юнит- и интеграционные тесты (101)
+└─ test/                        юнит- и интеграционные тесты (185)
 ```
 
 `dist/` и корневой `threejs-3d-card.js` собираются из `src/` и `models/` скриптом
 `scripts/build.mjs` и коммитятся: HACS для Dashboard-плагина ищет `filename` в
-корне репозитория и скачивает только корневые `.js` — поэтому там лежит
+корне репозитория на теге и скачивает только корневые `.js` — поэтому там лежит
 однофайловая сборка, которой на сервере больше ничего не нужно. Раскладка `dist/`
-остаётся для стенда и архива ручной установки (подробнее —
-[docs/HACS.md](docs/HACS.md)).
+остаётся для дев-стенда (подробнее — [docs/HACS.md](docs/HACS.md)).
 
 ---
 

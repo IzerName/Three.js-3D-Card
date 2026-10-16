@@ -42,12 +42,13 @@ Assistant's native entity picker for device selection.
 
 ### Manual
 
-1. Take `threejs-3d-card.zip` from the
-   [release](https://github.com/IzerName/Three.js-3D-Card/releases) (it is the
-   contents of `dist/` — the same card as plain ES modules) and unpack **all of
-   it** into `config/www/threejs-3d-card/`. The folder name may be anything;
-   keep the structure — `src/`, `models/` and `vendor/` must sit next to
-   `threejs-3d-card.js`.
+1. Take the single-file `threejs-3d-card.js` from the tag — the
+   [v0.1.3 release](https://github.com/IzerName/Three.js-3D-Card/releases/tag/v0.1.3)
+   (or the
+   [file source](https://github.com/IzerName/Three.js-3D-Card/blob/v0.1.3/threejs-3d-card.js)
+   on the tag) — and put it into `config/www/threejs-3d-card/`. The folder name
+   may be anything: the single-file build is self-contained and needs nothing
+   beside it.
 2. Add a resource: `/local/threejs-3d-card/threejs-3d-card.js`,
    type *JavaScript module*.
 3. Hard-refresh the page.
@@ -169,7 +170,7 @@ documented in [docs/MODEL_API.md](docs/MODEL_API.md).
 npm install
 npm run build     # build dist/ and the single-file threejs-3d-card.js in the root
 npm run serve     # dev bench: http://localhost:8099/dev/harness.html
-npm test          # unit and integration tests (101 checks)
+npm test          # unit and integration tests (185)
 npm run check     # build + tests
 ```
 
@@ -186,9 +187,9 @@ behave identically:
   (esbuild): three.js r160, the OBJ/MTL/glTF loaders, the card core and the
   built-in models inside one ~911 KB file. This is what HACS installs;
 * `dist/` — the same card as plain ES modules (`dist/threejs-3d-card.js` plus
-  `src/`, `models/`, `vendor/`). The bench serves it and it goes into
-  `threejs-3d-card.zip` for manual installation. No bundler is involved here,
-  which keeps browser debugging straightforward.
+  `src/`, `models/`, `vendor/`). The dev bench serves it; the layout is
+  committed to the repository and CI verifies it against the build. No bundler
+  is involved here, which keeps browser debugging straightforward.
 
 `dev/probe-bundle.html` checks the single-file build on the bench (module load,
 element registration, API, three.js from inside the bundle, no requests to
@@ -206,8 +207,8 @@ pages check the `dist/` layout.
    ([.github/workflows/release.yml](.github/workflows/release.yml)) runs the
    tests, rebuilds both layouts, verifies that the committed `dist/` and bundle
    match the build (`git diff --exit-code -- dist threejs-3d-card.js`) and
-   attaches `threejs-3d-card.zip` to the
-   [release](https://github.com/IzerName/Three.js-3D-Card/releases).
+   publishes the GitHub release **without file assets** — HACS takes the
+   `threejs-3d-card.js` from the tag tree.
 4. HACS picks up the new release; the resource needs no reinstall — HACS
    updates the `?hacstag=…` marker itself.
 
@@ -221,7 +222,7 @@ See [docs/HACS.md](docs/HACS.md) (Russian) for details.
 threejs-3d-card/
 ├─ hacs.json                    HACS manifest (filename: threejs-3d-card.js)
 ├─ threejs-3d-card.js           single-file build — committed, this is what HACS installs
-├─ dist/                        ES-module layout: dev bench and manual install
+├─ dist/                        ES-module layout: dev bench
 │  ├─ threejs-3d-card.js        entry point (the Lovelace resource)
 │  ├─ src/  models/             card core and models, same files as the sources
 │  └─ vendor/                   three.js r160 + OBJ/MTL/glTF loaders
@@ -231,14 +232,14 @@ threejs-3d-card/
 ├─ docs/                        MODEL_API, OBJECT_MODEL, CONFIGURATION, HACS
 ├─ dev/                         dev bench and browser self-check pages
 ├─ scripts/                     build.mjs (dist/ + root bundle), serve.mjs (dev server)
-└─ test/                        unit and integration tests (101)
+└─ test/                        unit and integration tests (185)
 ```
 
 Both `dist/` and the root `threejs-3d-card.js` are produced by
 `scripts/build.mjs` and committed. HACS looks for the `filename` in the
-repository root and downloads the root `.js` files only — so the root holds the
-single-file build, which needs nothing else on the server. The `dist/` layout
-stays for the bench and the manual-install archive.
+repository root on the tag and downloads the root `.js` files only — so the
+root holds the single-file build, which needs nothing else on the server. The
+`dist/` layout stays for the dev bench.
 
 ## Licence
 
