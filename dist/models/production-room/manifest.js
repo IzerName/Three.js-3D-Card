@@ -157,7 +157,8 @@ export const productionRoomModel = {
     config: {
       title: "Производственное помещение",
       show_hud: true,
-      height: 480,
+      // Высоту карточки не задаём: без `height` она занимает доступную
+      // область, а рекомендация для раскладки — manifest.size.defaultHeight.
     },
   },
 

@@ -172,6 +172,10 @@ function webglInfo(cardEl) {
 const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Пересекаются ли два прямоугольника getBoundingClientRect (T-018). */
+const overlaps = (a, b) => !!a && !!b &&
+  !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+
 /**
  * Дождаться условия (инициализация сцены занимает разное время — особенно
  * на программном WebGL). Возвращает true/false, а не бросает исключение.
@@ -305,7 +309,93 @@ const watchdog = setTimeout(() => {
         !!tankEngine && tankEngine.levelValid === true && Math.abs(tankEngine.targetLevel - 0.62) < 0.01,
         tankEngine ? `levelValid=${tankEngine.levelValid}, targetLevel=${tankEngine.targetLevel}` : "нет движка модели");
 
-      // 2. Модалка сущности
+      // 2. Панель диагностики (T-018): без show_diagnostics её быть не должно,
+      // а с ней она не имеет права перекрывать надписи верхней полосы карточки.
+      const cardRoot = tank.shadowRoot.querySelector(".t3d-root");
+      const diagEl = tank.shadowRoot.querySelector(".t3d-diag");
+      const hudEl = tank.shadowRoot.querySelector(".t3d-hud");
+      const cardRect = cardRoot.getBoundingClientRect();
+
+      step("панель диагностики скрыта без show_diagnostics",
+        diagEl.style.display === "none",
+        `display: ${diagEl.style.display || "(не задан)"}`);
+      // пустой панели нет — точка попадания в верхней полосе принадлежит канвасу
+      const hit = tank.shadowRoot.elementFromPoint(cardRect.left + 20, cardRect.top + 24);
+      step("верхняя полоса карточки отдаёт ввод канвасу",
+        !!hit && hit.classList.contains("t3d-canvas"),
+        hit ? `${hit.tagName.toLowerCase()}${hit.className ? "." + hit.className : ""}` : "нет элемента");
+
+      engine.setDiagnosticsVisible(true);
+      await raf();
+      const diagRect = diagEl.getBoundingClientRect();
+      const hudRect = hudEl.getBoundingClientRect();
+      // собственный HUD движка модели: бак рисует его в слое .t3d-legacy-host
+      const wtRoot = tank.shadowRoot.querySelector(".wt-root");
+      const modelHudRect = wtRoot && wtRoot.children[0] ? wtRoot.children[0].getBoundingClientRect() : null;
+      step("панель диагностики показывается и содержит строки",
+        diagRect.height > 0 && !!diagEl.querySelector(".t3d-diag-row"),
+        `высота ${Math.round(diagRect.height)}, строк ${diagEl.querySelectorAll(".t3d-diag-row").length}`);
+      step("рамка HUD и панели не пересекаются (короткий заголовок)",
+        !overlaps(hudRect, diagRect),
+        `низ HUD ${Math.round(hudRect.bottom)}, верх панели ${Math.round(diagRect.top)}`);
+      step("подпись HUD движка модели не перекрыта панелью",
+        !!modelHudRect && !overlaps(modelHudRect, diagRect),
+        modelHudRect
+          ? `низ HUD модели ${Math.round(modelHudRect.bottom)}, верх панели ${Math.round(diagRect.top)}`
+          : "нет .wt-root у модели");
+      report.dom.diagShort = {
+        hud: [Math.round(hudRect.top), Math.round(hudRect.bottom)],
+        modelHud: modelHudRect ? [Math.round(modelHudRect.top), Math.round(modelHudRect.bottom)] : null,
+        panel: [Math.round(diagRect.top), Math.round(diagRect.bottom)],
+      };
+
+      engine.setDiagnosticsVisible(false);
+      await raf();
+      step("панель диагностики скрывается по флагу",
+        diagEl.style.display === "none",
+        `display: ${diagEl.style.display || "(не задан)"}`);
+
+      // тот же замер при длинном (многострочном) заголовке: панель обязана
+      // уехать ниже выросшего HUD, а не наехать на него
+      const tall = makeCard({
+        type: "custom:threejs-3d-card",
+        model: "water-tank",
+        title: "Бак чистой воды с очень длинным названием для проверки панели диагностики: " +
+          "этот заголовок заведомо не помещается в одну строку ширины карточки и переносится",
+        height: 320,
+        show_diagnostics: true,
+        // как в исходном замечании: level не привязан, liters привязан —
+        // подпись HUD движка модели получается вида «— · 124 L»
+        entities: { liters: TANK.liters },
+      }, hass);
+      await waitEngine(tall, 25000, "water-tank");
+      await raf();
+      const tallHud = tall.shadowRoot.querySelector(".t3d-hud");
+      const tallDiag = tall.shadowRoot.querySelector(".t3d-diag");
+      const tallHudRect = tallHud.getBoundingClientRect();
+      const tallDiagRect = tallDiag.getBoundingClientRect();
+      const tallWt = tall.shadowRoot.querySelector(".wt-root");
+      const tallModelRect = tallWt && tallWt.children[0] ? tallWt.children[0].getBoundingClientRect() : null;
+      step("панель диагностики показана по конфигу (show_diagnostics: true)",
+        tallDiag.style.display !== "none" && tallDiagRect.height > 0 && !!tallDiag.querySelector(".t3d-diag-row"),
+        `display: ${tallDiag.style.display || "(не задан)"}, высота ${Math.round(tallDiagRect.height)}`);
+      step("длинный заголовок HUD переносится на несколько строк", tallHudRect.height > 30,
+        `высота HUD ${Math.round(tallHudRect.height)}`);
+      step("рамка HUD и панели не пересекаются (длинный заголовок)",
+        !overlaps(tallHudRect, tallDiagRect),
+        `низ HUD ${Math.round(tallHudRect.bottom)}, верх панели ${Math.round(tallDiagRect.top)}`);
+      step("длинный заголовок: HUD движка модели не перекрыт панелью",
+        !!tallModelRect && !overlaps(tallModelRect, tallDiagRect),
+        tallModelRect
+          ? `низ HUD модели ${Math.round(tallModelRect.bottom)}, верх панели ${Math.round(tallDiagRect.top)}`
+          : "нет .wt-root у модели");
+      report.dom.diagTall = {
+        hud: [Math.round(tallHudRect.top), Math.round(tallHudRect.bottom)],
+        modelHud: tallModelRect ? [Math.round(tallModelRect.top), Math.round(tallModelRect.bottom)] : null,
+        panel: [Math.round(tallDiagRect.top), Math.round(tallDiagRect.bottom)],
+      };
+
+      // 3. Модалка сущности
       engine.openEntityModal(TANK.level, "level");
       await raf();
       const modalRoot = tank.shadowRoot.querySelector(".t3d-modal-backdrop");
@@ -323,7 +413,7 @@ const watchdog = setTimeout(() => {
       step("переход в HA работает", moreInfo === TANK.level, `hass-more-info: ${moreInfo}`);
       engine.closeModal();
 
-      // 3. Смена модели на «цех»
+      // 4. Смена модели на «цех»
       tank.setConfig(Object.assign({}, tank.getConfig(), {
         model: "production-room", title: "Цех", height: 400,
         entities: { machine: "switch.machine", light1: "light.light_1", water: "sensor.water_total" },
@@ -340,7 +430,7 @@ const watchdog = setTimeout(() => {
           img2.error || `заполнено ${img2.coloredRatio}, цветов ${img2.distinctColors}`);
       }
 
-      // 4. Внешняя модель по URL
+      // 5. Внешняя модель по URL
       tank.setConfig({
         type: "custom:threejs-3d-card",
         model: "/dev/probe-model.js",
@@ -364,7 +454,7 @@ const watchdog = setTimeout(() => {
           img3.error || `заполнено ${img3.coloredRatio}, цветов ${img3.distinctColors}`);
       }
 
-      // 5. Отсутствующая сущность не ломает карточку
+      // 6. Отсутствующая сущность не ломает карточку
       tank.setConfig({
         type: "custom:threejs-3d-card",
         model: "water-tank",
@@ -379,7 +469,7 @@ const watchdog = setTimeout(() => {
       report.dom.lastErrors = (engine4 && engine4.diagnostics().errors) || [];
     }
 
-    // 6. Редактор
+    // 7. Редактор
     const editor = document.createElement("threejs-3d-card-editor");
     document.getElementById("stack").appendChild(editor);
     editor.hass = hass;

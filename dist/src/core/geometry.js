@@ -50,14 +50,7 @@ async function checkAddonThree() {
   }
 }
 
-const cache = new Map();   // url -> Promise<{ object, animations }> (клон дерева — на каждый вызов)
-
-/**
- * blob: URL ассетов и функции их отзыва. URL живёт, пока его используют
- * сцены; при dispose модели releaseAssetUrls() отзывает их через store,
- * чтобы следующий objectUrl(id) выдал свежий URL (T-010).
- */
-const assetUrlRevokes = new Map(); // blob: URL -> () => void
+const cache = new Map();   // (формат|url|mtl) -> Promise<{ object, animations }> (клон дерева — на каждый вызов)
 
 /** Определить формат по расширению файла. */
 export function detectFormat(url) {
@@ -68,76 +61,25 @@ export function detectFormat(url) {
 }
 
 /**
- * Найти ассет из model_assets по значению source.url / source.mtl.
- * Только точное совпадение (имя файла или путь из спека) либо явная
- * схема asset:<ключ> — нечёткого поиска нет.
- * @returns {{key: string, id: string} | null}
- */
-export function matchAsset(raw, assets) {
-  if (!assets || typeof assets !== "object" || raw === undefined || raw === null) return null;
-  const s = String(raw);
-  if (Object.prototype.hasOwnProperty.call(assets, s)) return { key: s, id: String(assets[s]) };
-  if (s.startsWith("asset:")) {
-    const k = s.slice("asset:".length);
-    if (Object.prototype.hasOwnProperty.call(assets, k)) return { key: k, id: String(assets[k]) };
-  }
-  return null;
-}
-
-/**
  * Нормализовать описание источника геометрии.
  * @param {object|string} source  { format, url, mtl, … }
  * @param {string} [base]         базовый URL для относительных путей
- * @param {object|null} [assets]  model_assets из конфигурации карточки
- *                                (ключ — имя файла или путь из спека,
- *                                значение — id ассета в браузере). Если
- *                                null — поведение как раньше (только сеть).
  */
-export function normalizeSource(source, base, assets) {
+export function normalizeSource(source, base) {
   if (!source) throw new Error("Не указан источник модели (source)");
   const src = typeof source === "string" ? { url: source } : Object.assign({}, source);
   if (!src.url) throw new Error("Не указан путь к файлу модели (source.url)");
-  if (src.isAsset) {
-    // Повторная нормализация уже подставленного ассета: ключ, id, формат
-    // и mtl вычислены при первом проходе — меняем ничего.
-    return src;
-  }
 
-  // Подстановка файлов из хранилища браузера (T-010).
-  const aUrl = matchAsset(src.url, assets);
-  if (aUrl) {
-    src.url = aUrl.key;         // ключ не резолвим: формат идёт по его имени
-    src.assetId = aUrl.id;
-    src.isAsset = true;
-  } else {
-    src.url = resolveUrl(src.url, base);
-  }
-  if (src.mtl) {
-    const aMtl = matchAsset(src.mtl, assets);
-    if (aMtl) {
-      src.mtl = aMtl.key;
-      src.mtlAssetId = aMtl.id;
-      src.mtlIsAsset = true;
-    } else {
-      src.mtl = resolveUrl(src.mtl, base);
-    }
-  }
+  src.url = resolveUrl(src.url, base);
+  if (src.mtl) src.mtl = resolveUrl(src.mtl, base);
   src.format = (src.format || detectFormat(src.url)).toLowerCase();
   if (src.format === "glb") src.format = "gltf";
   if (!["obj", "gltf"].includes(src.format)) {
     throw new Error(`Формат «${src.format}» не поддерживается: используйте OBJ (+MTL) или glTF/GLB`);
   }
   // Для OBJ, если MTL не указан, но рядом лежит одноимённый — берём его.
-  // У ассета «рядом» — соседний ключ <имя>.mtl в model_assets.
   if (src.format === "obj" && !src.mtl && src.autoMtl !== false) {
-    const siblingKey = String(src.url).replace(/\.obj(\?.*)?$/i, ".mtl$1");
-    if (src.isAsset && matchAsset(siblingKey, assets)) {
-      src.mtl = siblingKey;
-      src.mtlAssetId = String(assets[siblingKey]);
-      src.mtlIsAsset = true;
-    } else if (!src.isAsset) {
-      src.mtl = siblingKey;
-    }
+    src.mtl = String(src.url).replace(/\.obj(\?.*)?$/i, ".mtl$1");
   }
   return src;
 }
@@ -167,15 +109,10 @@ function resolveUrl(url, base) {
  */
 export async function loadGeometryEx(ctx, source) {
   checkAddonThree();
-  // model_assets — из «сырой» конфигурации панели (см. scene.js):
-  // без него null — поведение загрузки остаётся прежним.
-  const assets = (ctx && ctx.modelAssets) || null;
-  const src = normalizeSource(source, ctx.asset ? ctx.asset(".") : undefined, assets);
-  // Для ассета ключ кэша — id файла (blob: URL меняется на каждой
-  // загрузке и не должен плодить записи в кэше); для сети — путь, как раньше.
-  const key = src.isAsset
-    ? `${src.format}|asset:${src.assetId}|${src.mtlAssetId || ""}`
-    : `${src.format}|${src.url}|${src.mtl || ""}`;
+  const src = normalizeSource(source, ctx.asset ? ctx.asset(".") : undefined);
+  // Ключ кэша — формат и оба пути файлов: повторная загрузка той же модели
+  // берётся из кэша, разные источники не смешиваются.
+  const key = `${src.format}|${src.url}|${src.mtl || ""}`;
 
   if (!cache.has(key)) {
     cache.set(key, loadOnce(ctx, src).catch((e) => {
@@ -205,38 +142,6 @@ async function loadOnce(ctx, src) {
 
 // ---- OBJ + MTL --------------------------------------------------------------
 
-/**
- * Взять файл ассета из хранилища браузера (T-010).
- * @returns {Promise<{url: string, revoke: () => void}>}
- * @throws  с понятным сообщением, если ассета в этом браузере нет.
- */
-async function resolveAssetFile(ctx, id, name) {
-  let file = null;
-  if (typeof ctx.assetFile === "function") {
-    try {
-      file = await ctx.assetFile(id);
-    } catch (e) {
-      file = null;
-    }
-  }
-  if (!file) {
-    const msg = `файл модели «${name}» загружен в другом браузере — загрузите его снова в редакторе`;
-    if (ctx.report) ctx.report("error", msg);
-    throw new Error(msg);
-  }
-  return file;
-}
-
-/** Запомнить blob: URL на объекте и в реестре отзыва (T-010). */
-function markAssetUrls(object, files) {
-  if (!files.length) return;
-  const urls = files.map((f) => f.url);
-  object.userData._t3dAssetUrls = urls;
-  for (const f of files) {
-    assetUrlRevokes.set(f.url, typeof f.revoke === "function" ? f.revoke : null);
-  }
-}
-
 async function loadObj(ctx, src) {
   // Спецификаторы ЛИТЕРАЛЬНЫЕ намеренно: в однофайловой сборке
   // (threejs-3d-card.js в корне репозитория) сборщик подставляет сюда код
@@ -245,20 +150,8 @@ async function loadObj(ctx, src) {
   const { OBJLoader } = await import("../../vendor/three-addons/loaders/OBJLoader.js");
   const loader = new OBJLoader();
 
-  // Ассеты из хранилища браузера загрузчик читает с blob: URL, а не с пути.
-  const assetFiles = [];
-  let objUrl = src.url;
-  let mtlUrl = src.mtl || null;
-  if (src.isAsset) {
-    const f = await resolveAssetFile(ctx, src.assetId, src.url);
-    objUrl = f.url;
-    assetFiles.push(f);
-  }
-  if (mtlUrl && src.mtlIsAsset) {
-    const f = await resolveAssetFile(ctx, src.mtlAssetId, src.mtl);
-    mtlUrl = f.url;
-    assetFiles.push(f);
-  }
+  const objUrl = src.url;
+  const mtlUrl = src.mtl || null;
 
   if (mtlUrl) {
     try {
@@ -277,7 +170,6 @@ async function loadObj(ctx, src) {
 
   const object = await loader.loadAsync(objUrl);
   object.name = object.name || "obj-root";
-  markAssetUrls(object, assetFiles);
   if (src.normalize !== false) centerAndScale(ctx, object, src);
   return object;
 }
@@ -308,21 +200,10 @@ async function loadGltf(ctx, src) {
     }
   }
 
-  // Ассеты из хранилища браузера: GLB — единый файл, текстуры уже внутри;
-  // внешний .gltf (отдельный .bin/картинки) из хранилища не читается.
-  const assetFiles = [];
-  let gltfUrl = src.url;
-  if (src.isAsset) {
-    const f = await resolveAssetFile(ctx, src.assetId, src.url);
-    gltfUrl = f.url;
-    assetFiles.push(f);
-  }
-
-  const gltf = await loader.loadAsync(gltfUrl);
+  const gltf = await loader.loadAsync(src.url);
   const scene = gltf.scene || (gltf.scenes && gltf.scenes[0]);
   if (!scene) throw new Error(`В файле ${src.url} нет сцены glTF`);
   scene.name = scene.name || "gltf-root";
-  markAssetUrls(scene, assetFiles);
   // Клипы glTF отдаём дальше (T-013): действие play привязывает их к
   // состоянию сущности. Они хранятся в кэше вместе с исходным деревом.
   if (src.normalize !== false) centerAndScale(ctx, scene, src);
@@ -382,35 +263,6 @@ function cloneObject(object, THREE) {
     }
   });
   return copy;
-}
-
-/**
- * Отозвать blob: URL ассетов поддерева (T-010). Вызывается при dispose
- * модели: после разбора файла загрузчик больше не обращается к URL, а
- * отзыв через store сбрасывает его кэш, чтобы следующая загрузка (в новой
- * сцене или после сброса кэша геометрии) получила свежий URL.
- */
-export function releaseAssetUrls(root) {
-  if (!root || typeof root.traverse !== "function") return;
-  const urls = new Set();
-  root.traverse((n) => {
-    if (n.userData && Array.isArray(n.userData._t3dAssetUrls)) {
-      for (const u of n.userData._t3dAssetUrls) {
-        if (typeof u === "string" && u.length) urls.add(u);
-      }
-    }
-  });
-  for (const u of urls) {
-    const revoke = assetUrlRevokes.get(u);
-    if (revoke) {
-      // Через store: отзовётся и глобальный URL, и запись в его кэше.
-      assetUrlRevokes.delete(u);
-      try { revoke(); } catch (e) { /* ignore */ }
-    } else if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function" && u.startsWith("blob:")) {
-      assetUrlRevokes.delete(u);
-      try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
-    }
-  }
 }
 
 /** Сбросить кэш загруженных моделей (используется в тестах и при перезагрузке). */

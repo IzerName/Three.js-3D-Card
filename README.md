@@ -118,7 +118,7 @@
 type: custom:threejs-3d-card
 model: water-tank
 title: Бак чистой воды
-height: 400
+# height не задаём: карточка занимает всю доступную высоту
 entities:
   level: sensor.water_preparation_level_clean_percentage
   liters: sensor.water_preparation_level_clean_liters
@@ -178,11 +178,38 @@ entities:
 
 ## Импорт своей модели
 
-1. Положите файл модели в `config/www/3d-models/my-model.js`.
-   Минимальный пример — в [docs/MODEL_API.md](docs/MODEL_API.md#1-быстрый-старт-минимальная-модель).
-2. В редакторе карточки выберите **Модель → «Импортировать модель по URL…»**
-   и укажите `/local/3d-models/my-model.js`.
-3. Нажмите **Загрузить** — карточка прочитает файл, покажет его `bindings` и
+Файлы модели лежат **на сервере Home Assistant**, в папке `config/www/3d-models/`:
+именно её Home Assistant отдаёт браузеру как `/local/` — то есть
+`config/www/3d-models/my-model.js` доступен по `/local/3d-models/my-model.js`.
+Заливки файлов из карточки нет: Home Assistant не даёт записать файл в
+`config/www` (почему — в
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md#почему-файлы-кладут-вручную)).
+
+**Положите файлы в `config/www/3d-models/`** любым привычным способом — это
+обычная папка конфигурации Home Assistant:
+
+* **Samba share** или **Advanced SSH & Web Terminal** — скопировать файлы в
+  `config/www/3d-models/`;
+* **File editor** или **Studio Code Server** — создать папку и добавить файлы
+  через веб-интерфейс.
+
+Что кладём:
+
+* **код модели** — `my-model.js`: файл вызывает
+  `window.ThreeJS3DCard.defineModel({...})`;
+* **или спецификацию** — `room.json` (`manifest`/`source`/`bindings`, см.
+  [docs/OBJECT_MODEL.md](docs/OBJECT_MODEL.md)): карточка собирает сцену из неё
+  сама, JavaScript не нужен;
+* **рядом — геометрию и материалы**, на которые ссылается спецификация или код
+  модели: `.glb`/`.gltf`, `.obj` + `.mtl`, текстуры. Ссылки внутри
+  спецификации относительные (`source.url: "house.glb"`,
+  `source.mtl: "house.mtl"`) и разрешаются от каталога `.json`-файла.
+
+Указать модель в карточке:
+
+1. В редакторе выберите **Модель → «Импортировать модель по URL…»** и укажите
+   `/local/3d-models/my-model.js` или `/local/3d-models/room.json`.
+2. Нажмите **Загрузить** — карточка прочитает файл, покажет его `bindings` и
    `params` и построит форму привязок.
 
 Либо сразу в YAML:
@@ -194,9 +221,17 @@ model_url: /local/3d-models/my-model.js
 reload_model: true      # принудительно перечитать файл (обход кэша)
 ```
 
-Модель обязана вызвать `window.ThreeJS3DCard.defineModel({...})` — полное
-описание контракта, полей `bindings`/`params` и контекста `ctx` находится в
-**[docs/MODEL_API.md](docs/MODEL_API.md)**.
+`reload_model: true` нужен после замены файла на сервере: браузер держит
+старую версию в кэше.
+
+> ⚠️ **Не указывайте в поле «Модель» сам `.glb` или `.obj`.** Карточка
+> исполняет файл как код модели, если его имя не оканчивается на `.json`
+> (`_loadExternal()` в `src/core/registry.js`), — геометрия подключается только
+> через спецификацию (`.json`) или код модели (`.js`).
+
+Код модели обязан вызвать `window.ThreeJS3DCard.defineModel({...})` — полное
+описание контракта, полей `bindings`/`params` и контекста `ctx` (вместе с
+минимальным примером) находится в **[docs/MODEL_API.md](docs/MODEL_API.md)**.
 
 ---
 
@@ -211,7 +246,7 @@ reload_model: true      # принудительно перечитать фай
 | `allow_external_models` | boolean | `true` | Запретить импорт внешних моделей |
 | `title` | string | из модели | Заголовок в HUD; пустая строка — скрыть |
 | `show_hud` | boolean | `true` | Показывать заголовок |
-| `height` | number | из модели | Высота карточки в пикселях |
+| `height` | number | не задано (авто) | Высота карточки в пикселях. Без неё карточка занимает всю доступную область (клетку раздела или рекомендованную моделью высоту) |
 | `entities` | object | — | Привязки: `ключ: entity_id` |
 | `params` | object | из модели | Настройки модели (ключи как объявлены в модели) |
 | `camera` | object | из модели | Переопределение камеры: `radius`, `phi`, `theta`, `target`, `minRadius`, `maxRadius` |
@@ -272,7 +307,7 @@ reload_model: true      # принудительно перечитать фай
 npm install          # three.js, terser, esbuild
 npm run build        # собрать dist/ и однофайловый threejs-3d-card.js в корне
 npm run serve        # локальный стенд: http://localhost:8099/dev/harness.html
-npm test             # юнит- и интеграционные тесты (185)
+npm test             # юнит- и интеграционные тесты
 npm run check        # сборка + тесты
 npm run watch        # пересборка при изменении src/ и models/
 ```
@@ -294,6 +329,7 @@ npm run watch        # пересборка при изменении src/ и mo
 | `dev/probe-render.html` | Что обе модели действительно рисуют кадры и не теряют WebGL-контекст. |
 | `dev/probe-obj.html` | Объектная модель из OBJ/MTL: имена объектов, цвет по состоянию и по числу, светильник, дверь (петля), вентилятор, текст, редактор. |
 | `dev/probe-glb.html`, `dev/probe-gltf.html` | Загрузка GLB и glTF (с внешним `.bin`) через карточку. |
+| `dev/probe-ui-height-focus.html` | Раскладка в настоящем браузере: занимает ли карточка высоту родителя (раздел и «кирпичная» раскладка) и сохраняется ли фокус в поле редактора, когда HA возвращает конфигурацию обратно. |
 
 Отчёты этих страниц складываются в `dev/report.json`. Прогнать страницу в
 headless Chrome в реальном времени (нужно для проверок, которые зависят от
@@ -313,7 +349,7 @@ node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-obj.html 30000
 
 * `threejs-3d-card.js` в корне репозитория — **однофайловая сборка** (esbuild):
   внутри three.js r160, загрузчики OBJ/MTL/glTF, ядро карточки и встроенные
-  модели, около 951 КБ. Именно её ставит HACS;
+  модели, около 1 МБ. Именно её ставит HACS;
 * `dist/` — та же карточка обычными ES-модулями (`dist/threejs-3d-card.js` +
   `src/`, `models/`, `vendor/`). Её отдаёт стенд (`npm run serve`); раскладка
   закоммичена в репозиторий, и CI сверяет её с результатом сборки. Бандлер
@@ -350,7 +386,7 @@ node dev/probe-runner.mjs http://127.0.0.1:8099/dev/probe-obj.html 30000
 | `NotSupportedError: Shadow root cannot be created…` | Так падала версия 0.1.0 при переподключении элемента Lovelace — в 0.1.1 исправлено: обновите файл карточки и страницу (Ctrl+F5). |
 | Сцена пустая, ошибок нет | Включите `show_diagnostics: true` — панель покажет незаполненные и недоступные привязки. |
 | Сущность «не найдена» в редакторе | Опечатка в `entity_id`, другая панель/интеграция или сущность удалена. |
-| Карточка тормозит | Отключите `shadows` в `environment`, уменьшите `height`, не ставьте больше 3–4 3D-карточек на один дашборд. |
+| Карточка тормозит | Отключите `shadows` в `environment`, уменьшите размер карточки, не ставьте больше 3–4 3D-карточек на один дашборд. |
 | Пропала 3D-сцена после переключения вкладок | Карточка освобождает WebGL-контекст при удалении и создаёт заново. Если сцена не вернулась — обновите страницу и сообщите об ошибке. |
 
 Полезно в консоли браузера:
@@ -409,6 +445,7 @@ threejs-3d-card/
 ├─ docs/
 │  ├─ MODEL_API.md              API модели (контракт для своих сцен)
 │  ├─ OBJECT_MODEL.md           декларативный формат объектной модели
+│  ├─ OBJECT_NAMES.md           имена объектов: как их узнать в файле модели
 │  ├─ CONFIGURATION.md          все параметры карточки
 │  └─ HACS.md                   публикация своего репозитория в HACS
 ├─ dev/harness.html             стенд разработки с демо-состояниями
@@ -416,7 +453,7 @@ threejs-3d-card/
 ├─ scripts/
 │  ├─ build.mjs                 сборка: dist/ и корневой threejs-3d-card.js
 │  └─ serve.mjs                 локальный HTTP-сервер
-└─ test/                        юнит- и интеграционные тесты (185)
+└─ test/                        юнит- и интеграционные тесты
 ```
 
 `dist/` и корневой `threejs-3d-card.js` собираются из `src/` и `models/` скриптом

@@ -91,19 +91,6 @@ MODELS["no-source.json"] = JSON.stringify({ manifest: { id: "no-source" }, bindi
 // Content-Type «файлов» для заглушки fetch (T-011).
 const CONTENT_TYPE = { "typed-spec": "application/json" };
 
-// T-011: хранилище asset: в Node — фейк-бэкенд поверх Map, а blob: URL
-// fetch не прочитает, поэтому AssetStore выдаст mem://-псевдо-URLы,
-// которые заглушка fetch умеет читать (паттерн из карточки T-010).
-const ASSET_BACKEND = new Map();
-function fakeBackend() {
-  return {
-    put: async (rec) => { ASSET_BACKEND.set(rec.id, rec); },
-    get: async (id) => ASSET_BACKEND.get(id) || null,
-    all: async () => [...ASSET_BACKEND.values()],
-    remove: async (id) => { ASSET_BACKEND.delete(id); },
-  };
-}
-URL.createObjectURL = () => { throw new Error("blob: недоступен в тестах Node"); };
 // Обёртка (spec-wrap.js) вызывает createObjectModel — как в браузере
 // через window.ThreeJS3DCard (тут = globalThis).
 globalThis.createObjectModel = (await import(
@@ -145,13 +132,6 @@ if (!globalThis.defineModel) globalThis.defineModel = () => {};
  */
 globalThis.fetch = async (url) => {
   const s = String(url);
-  // T-011: файл хранилища asset: через mem://-псевдо-URL (Node, T-010).
-  if (s.startsWith("mem://")) {
-    const id = s.slice("mem://".length).split("#")[0];
-    const rec = ASSET_BACKEND.get(id);
-    if (!rec) return { ok: false, status: 404, statusText: "Not Found", text: async () => "" };
-    return { ok: true, status: 200, statusText: "OK", text: async () => rec.blob.text() };
-  }
   fetchCount++;
   const name = s.split("?")[0].split("/").pop();
   const body = MODELS[name];
@@ -366,65 +346,3 @@ test("спека без source — понятная ошибка с путём",
   );
 });
 
-test("asset:<имя>.json — спека из хранилища браузера (T-010)", async () => {
-  const { registry } = await freshRegistry();
-  const { AssetStore, setSharedAssetStore } = await import(
-    pathToFileURL(path.resolve("dist/src/core/asset-store.js")).href
-  );
-  ASSET_BACKEND.clear();
-  const store = new AssetStore(fakeBackend());
-  await store.put(new File(
-    [JSON.stringify({
-      manifest: { id: "asset-house", name: "Дом из хранилища", apiVersion: 1 },
-      source: { format: "obj", url: "asset-house.obj" },
-      bindings: [],
-    })],
-    "asset-house.json",
-    { type: "application/json" }
-  ));
-  setSharedAssetStore(store);
-  try {
-    const model = await registry.resolve("asset:asset-house.json");
-    assert.equal(model.manifest.id, "asset-house");
-    assert.equal(typeof model.create, "function");
-    assert.equal(model._sourceUrl, "asset:asset-house.json");
-    assert.ok(registry.has("asset:asset-house.json"), "доступно по asset:-ключу");
-    // Повторный resolve — из кэша, файл не перечитывается.
-    const again = await registry.resolve("asset:asset-house.json");
-    assert.equal(model, again, "повторное разрешение из кэша");
-  } finally {
-    setSharedAssetStore(null);
-  }
-});
-
-test("asset: без хранилища — понятная ошибка", async () => {
-  const { registry } = await freshRegistry();
-  await assert.rejects(
-    () => registry.resolve("asset:ghost.json"),
-    /asset:ghost\.json[\s\S]*недоступно/
-  );
-});
-
-test("asset: файл не загружен — понятная ошибка с подсказкой", async () => {
-  const { registry } = await freshRegistry();
-  const { AssetStore, setSharedAssetStore } = await import(
-    pathToFileURL(path.resolve("dist/src/core/asset-store.js")).href
-  );
-  setSharedAssetStore(new AssetStore(fakeBackend())); // пустое хранилище
-  try {
-    await assert.rejects(
-      () => registry.resolve("asset:ghost.json"),
-      /ghost\.json[\s\S]*нет в хранилище/
-    );
-  } finally {
-    setSharedAssetStore(null);
-  }
-});
-
-test("asset: не-.json отклоняется — в хранилище только спеки", async () => {
-  const { registry } = await freshRegistry();
-  await assert.rejects(
-    () => registry.resolve("asset:room.js"),
-    /asset:room\.js[\s\S]*\.json/
-  );
-});

@@ -552,6 +552,53 @@ test("SceneEngine: тап вызывает выбор, перетаскиван�
   engine.dispose();
 });
 
+test("SceneEngine T-018: панель диагностики скрыта по умолчанию и по флагу", async () => {
+  const engine = await makeCamEngine({
+    bindings: [{ key: "level", name: "Уровень", domain: ["sensor"], value: { kind: "number" } }],
+  }, { entities: { level: "sensor.level" } });
+
+  // Без show_diagnostics панель создана, но не показана: пустого
+  // прямоугольника поверх сцены (и перехвата ввода) быть не должно.
+  assert.equal(engine._diag.style.display, "none", "панель видна без show_diagnostics");
+  assert.equal(engine._diag.children.length, 0, "скрытая панель не должна заполняться");
+
+  engine.setDiagnosticsVisible(true);
+  assert.notEqual(engine._diag.style.display, "none", "панель не показана по флагу");
+  assert.ok(engine._diag.querySelector(".t3d-diag-row"), "в панели нет строк привязок");
+  // без измерений остаётся CSS-фолбэк .t3d-diag { top: 12px }
+  assert.equal(engine._diag.style.top, "", "верх панели не должен зависеть от несуществующей вёрстки");
+
+  engine.setDiagnosticsVisible(false);
+  assert.equal(engine._diag.style.display, "none", "панель не скрыта обратно по флагу");
+
+  engine.dispose();
+});
+
+test("SceneEngine T-018: панель диагностики встаёт ниже надписей верхней полосы", async () => {
+  const engine = await makeCamEngine({
+    bindings: [{ key: "level", name: "Уровень", domain: ["sensor"], value: { kind: "number" } }],
+  }, { entities: { level: "sensor.level" } });
+
+  // Заглушка вёрстки: надписи верхней полосы (HUD карточки и собственный HUD
+  // модели) уже посчитаны, у панели — свой прямоугольник в той же полосе.
+  const modelHud = new El("div");
+  engine.container.appendChild(modelHud);
+  engine.container.querySelectorAll = () => [engine._hud, modelHud, engine._diag];
+  engine.container.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 400, right: 640, width: 640, height: 400 });
+  engine._hud.getBoundingClientRect = () => ({ top: 10, bottom: 30, height: 20 });
+  modelHud.getBoundingClientRect = () => ({ top: 10, bottom: 44, height: 34 });
+  engine._diag.getBoundingClientRect = () => ({ top: 12, bottom: 38, height: 26 });
+
+  engine.setDiagnosticsVisible(true);
+
+  // ниже самой низкой надписи полосы (44) с зазором 8 и с тем же отступом
+  // снизу, что и в CSS (12): панель не перекрывает текст и влезает в карточку
+  assert.equal(engine._diag.style.top, "52px", "панель перекрывает надписи верхней полосы");
+  assert.equal(engine._diag.style.maxHeight, "calc(100% - 64px)", "панель не вписана в высоту карточки");
+
+  engine.dispose();
+});
+
 test("SceneEngine: host: external — движок не вешает жесты и не падает", async () => {
   const engine = await makeCamEngine({
     manifest: {

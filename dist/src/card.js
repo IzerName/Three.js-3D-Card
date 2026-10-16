@@ -26,7 +26,6 @@
 
 import { loadThree, threeSync } from "./core/three-loader.js";
 import { SceneEngine } from "./core/scene.js";
-import { getSharedAssetStore } from "./core/asset-store.js";
 import { registry, defineModel, builtinIds, absoluteUrl } from "./core/registry.js";
 import { createObjectModel } from "./core/object-model.js";
 import {
@@ -82,6 +81,24 @@ Object.defineProperty(api, "THREE", {
   set(v) { Object.defineProperty(api, "THREE", { value: v, writable: true, configurable: true, enumerable: true }); },
 });
 
+/** Минимальная высота карточки в пикселях (как в styles.js: .t3d-root). */
+const MIN_CARD_HEIGHT = 120;
+
+/** Задержка перед показом «Загрузка модели…» (кэш отвечает быстрее). */
+const STATUS_DELAY_MS = 180;
+
+/**
+ * Память вида камеры на время «горячей» пересборки сцены.
+ *
+ * Home Assistant в режиме предпросмотра (окно редактирования карточки)
+ * пересоздаёт элемент карточки на каждое изменение конфигурации — новый
+ * элемент, новая сцена, камера по умолчанию. Запоминаем последний вид и
+ * возвращаем его, если сцена пересобралась только что (короткий TTL, чтобы
+ * не влиять на разные карточки на дашборде).
+ */
+const VIEW_MEMORY = { key: "", view: null, at: 0 };
+const VIEW_MEMORY_TTL = 2000;
+
 class ThreeDModelCard extends HTMLElement {
   constructor() {
     super();
@@ -94,6 +111,7 @@ class ThreeDModelCard extends HTMLElement {
     this._pendingStates = null;
     this._root = null;
     this._shadow = null;
+    this._reloaded = false;
   }
 
   // ---- конфигурация --------------------------------------------------------
@@ -106,11 +124,8 @@ class ThreeDModelCard extends HTMLElement {
     }
     const modelId = config.model || config.model_id || legacyModelId(config) || "water-tank";
     const next = Object.assign({}, config, { model: modelId });
-    // Смена файлов в model_assets (загрузка/удаление в редакторе) — тоже
-    // повод пересобрать сцену: геометрия теперь берётся из браузера.
     const changedModel = !this._config || this._config.model !== next.model
-      || this._config.model_url !== next.model_url
-      || !modelAssetsEqual(this._config.model_assets, next.model_assets);
+      || this._config.model_url !== next.model_url;
 
     // Совместимость: старый вид конфигурации с одним ключом entities
     if (config.entities && typeof config.entities === "object") {
@@ -119,9 +134,15 @@ class ThreeDModelCard extends HTMLElement {
 
     this._config = next;
     if (!this._root && this.isConnected) this._mount();
+    this._applyHeight();
     if (this._engine) {
       if (changedModel) this._rebuild();
-      else this._engine.applyConfig(this._config);
+      else {
+        // Высота карточки — только оформление: сцену она не пересобирает,
+        // а размер рендерера подхватывает ResizeObserver движка.
+        this._engine.applyConfig(this._config);
+        this._syncDiagnostics();
+      }
     } else {
       // Сцена ещё не построена (первый setConfig или конфигурация пришла
       // раньше подключения элемента) — запускаем построение.
@@ -138,8 +159,7 @@ class ThreeDModelCard extends HTMLElement {
     this._hass = value;
     if (this._engine) {
       this._engine.applyHass(value);
-      const diag = this._config && this._config.show_diagnostics;
-      if (diag) this._engine.setDiagnosticsVisible(true);
+      this._syncDiagnostics();
     } else if (value) {
       this._pendingStates = value.states;
       // Конфигурация могла прийти раньше подключения элемента: состояния
@@ -163,6 +183,12 @@ class ThreeDModelCard extends HTMLElement {
   disconnectedCallback() {
     // Полностью освобождаем WebGL-контекст: на дашборде карточка может
     // пересоздаваться при переключении вкладок, а число контекстов ограничено.
+    //
+    // Перед освобождением запоминаем вид камеры: в окне редактирования
+    // Lovelace пересоздаёт элемент карточки на каждое изменение конфигурации,
+    // и без этого камера возвращалась бы к виду по умолчанию после каждого
+    // введённого символа.
+    this._rememberView();
     if (this._engine) {
       this._engine.dispose();
       this._engine.disposeDom();
@@ -192,18 +218,118 @@ class ThreeDModelCard extends HTMLElement {
     this._shadow = shadow;
     const root = document.createElement("div");
     root.className = "t3d-root";
-    root.style.cssText = `width:100%;height:${this._heightPx()}px;position:relative;`;
+    root.style.cssText = "width:100%;position:relative;";
     (shadow || this).appendChild(root);
     this._root = root;
     ensureStyles(shadow || document.head);
+    this._applyHeight();
   }
 
+  /**
+   * Высота карточки в пикселях или `null`, если высота не задана.
+   *
+   * `height` — необязательный параметр Lovelace: раньше он подставлялся из
+   * модели и задавал фиксированную высоту (и попадал в конфигурацию модели как
+   * «высота» — из-за этого правка поля «Высота, px» выглядела как изменение
+   * самой модели). Теперь без `height` карточка занимает всю доступную
+   * область: в разделе (Sections) — клетку сетки, в «кирпичной» раскладке —
+   * рекомендованную моделью высоту.
+   */
   _heightPx() {
     const c = this._config || {};
-    if (Number.isFinite(c.height)) return Math.max(120, c.height);
-    const h = parseFloat(c.height);
-    if (Number.isFinite(h)) return Math.max(120, h);
-    return 360;
+    const raw = typeof c.height === "number" ? c.height : parseFloat(c.height);
+    if (Number.isFinite(raw)) return Math.max(MIN_CARD_HEIGHT, raw);
+    return null;
+  }
+
+  /** Рекомендованная моделью высота в пикселях (для авто-режима). */
+  _recommendedHeightPx() {
+    const size = (this._model && this._model.manifest && this._model.manifest.size) || {};
+    const h = Number(size.defaultHeight);
+    return Number.isFinite(h) && h > MIN_CARD_HEIGHT ? h : 360;
+  }
+
+  /**
+   * Применить высоту к корню карточки.
+   *
+   * Явная высота (`height` в конфигурации) — фиксированные пиксели, как и
+   * раньше. Без неё карточка занимает всю доступную область: `height: 100%`
+   * растягивает её на клетку сетки раздела (или на весь панельный вид), а если
+   * родитель высоты не задаёт («кирпичная» раскладка) — подставляем
+   * рекомендованную моделью высоту (см. _fillAutoHeight).
+   */
+  _applyHeight() {
+    const root = this._root;
+    if (!root) return;
+    const px = this._heightPx();
+    if (px !== null) {
+      this._autoFilled = false;
+      root.style.height = `${px}px`;
+      root.style.minHeight = `${MIN_CARD_HEIGHT}px`;
+      return;
+    }
+    if (this._autoFilled) {
+      // Уже выяснили, что родитель высоты не задаёт («кирпичная» раскладка):
+      // держим рекомендованную высоту, уточняя её по мере загрузки модели.
+      root.style.height = `${this._recommendedHeightPx()}px`;
+      root.style.minHeight = `${MIN_CARD_HEIGHT}px`;
+      return;
+    }
+    root.style.height = "100%";
+    // Пока высота родителя неизвестна, держим нижнюю границу: иначе канвас
+    // успел бы построиться нулевого размера.
+    root.style.minHeight = `${MIN_CARD_HEIGHT}px`;
+    this._fillAutoHeight();
+  }
+
+  /**
+   * «Кирпичная» раскладка (и режим auto height в разделе) не задаёт карточке
+   * высоту: тогда `height: 100%` схлопывается к нижней границе. После раскладки
+   * это видно по фактической высоте — если родитель её не задал, ставим
+   * рекомендованную моделью высоту, чтобы карточка не была полоской.
+   */
+  _fillAutoHeight() {
+    const root = this._root;
+    if (!root) return;
+    const measure = () => {
+      if (this._root !== root) return;                 // карточку пересобрали
+      if (this._heightPx() !== null) return;           // height задан явно
+      if (this._autoFilled) return;
+      const h = root.clientHeight || 0;
+      if (h > MIN_CARD_HEIGHT + 1) return;             // высоту задал родитель
+      root.style.height = `${this._recommendedHeightPx()}px`;
+      this._autoFilled = true;
+      if (this._engine) this._engine.resize();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
+    else setTimeout(measure, 0);
+  }
+
+  /** Ключ, по которому запоминается вид камеры (модель + настройки вида). */
+  _viewKey() {
+    const c = this._config || {};
+    return `${c.model || ""}|${JSON.stringify(c.camera || null)}`;
+  }
+
+  _rememberView() {
+    const engine = this._engine;
+    if (!engine || typeof engine.getView !== "function") return;
+    try {
+      const view = engine.getView();
+      if (!view || !Array.isArray(view.target)) return;
+      VIEW_MEMORY.key = this._viewKey();
+      VIEW_MEMORY.view = view;
+      VIEW_MEMORY.at = Date.now();
+    } catch (e) { /* вид камеры — не критичная часть */ }
+  }
+
+  _restoreView(engine) {
+    const view = VIEW_MEMORY.view;
+    if (!view || VIEW_MEMORY.key !== this._viewKey()) return;
+    if (Date.now() - VIEW_MEMORY.at > VIEW_MEMORY_TTL) return;
+    try {
+      engine.setView(view);
+    } catch (e) { /* вид камеры — не критичная часть */ }
   }
 
   /** Пересоздать сцену (смена модели в редакторе). */
@@ -239,10 +365,16 @@ class ThreeDModelCard extends HTMLElement {
     this._bootAgain = false;
     this._booting = true;
     const root = this._root;
-    root.style.height = `${this._heightPx()}px`;
+    this._applyHeight();
 
+    // Заглушка «Загрузка модели…» показывается не сразу: модель (модуль и
+    // геометрия) обычно уже в кэше, и в окне редактирования, где Lovelace
+    // пересоздаёт карточку на каждое изменение конфигурации, мгновенная
+    // вспышка выглядела как «модель загружается заново после каждого символа».
     const status = this._fallbackNode("Загрузка модели…");
+    status.style.visibility = "hidden";
     root.appendChild(status);
+    const statusTimer = setTimeout(() => { status.style.visibility = ""; }, STATUS_DELAY_MS);
 
     try {
       // reload_model — разовый флаг (редактор перечитал файл модели):
@@ -255,6 +387,7 @@ class ThreeDModelCard extends HTMLElement {
         allowExternal: this._config.allow_external_models !== false,
       });
       const THREE = await loadThree();
+      clearTimeout(statusTimer);
       if (status.parentNode) status.parentNode.removeChild(status);
 
       // Элемент мог быть удалён с дашборда, пока грузилась модель.
@@ -266,9 +399,6 @@ class ThreeDModelCard extends HTMLElement {
       const engine = new SceneEngine(root, this._config, model, {
         THREE,
         hass: this._hass,
-        // Хранилище файлов моделей в браузере (T-010): общий экземпляр
-        // на страницу, пишется редактором, читается сценой.
-        assetStore: getSharedAssetStore(),
         onService: (domain, service, data) => {
           if (this._hass && this._hass.callService) this._hass.callService(domain, service, data || {});
         },
@@ -277,6 +407,12 @@ class ThreeDModelCard extends HTMLElement {
       this._currentEngine = engine;
       await engine.init();
       this._engine = engine;
+      // В окне редактирования карточка пересоздаётся на каждое изменение
+      // конфигурации: возвращаем тот вид камеры, который был у прежней сцены,
+      // иначе модель «прыгала» бы к виду по умолчанию после каждой буквы.
+      this._restoreView(engine);
+      // Модель могла задать свои габариты — уточняем авто-высоту.
+      this._applyHeight();
     } catch (e) {
       console.error("[threejs-3d-card]", e);
       if (status.parentNode) {
@@ -284,12 +420,13 @@ class ThreeDModelCard extends HTMLElement {
         status.classList.add("t3d-fallback-error");
       }
     } finally {
+      clearTimeout(statusTimer);
       this._booting = false;
       const built = this._engine;
       if (built) {
         if (this._hass) built.applyHass(this._hass);
         else if (this._pendingStates) built.applyStates(this._pendingStates);
-        if (this._config.show_diagnostics) built.setDiagnosticsVisible(true);
+        built.setDiagnosticsVisible(!!(this._config.show_diagnostics));
         built.start();
       }
       if (this._bootAgain) {
@@ -297,6 +434,18 @@ class ThreeDModelCard extends HTMLElement {
         setTimeout(() => this._boot(), 0);
       }
     }
+  }
+
+  /**
+   * Показать или скрыть панель диагностики по конфигурации карточки (T-018).
+   *
+   * Нужны оба направления: раньше вызов был только на включение, поэтому
+   * панель, показанная один раз, оставалась висеть после выключения
+   * `show_diagnostics` в редакторе.
+   */
+  _syncDiagnostics() {
+    if (!this._engine) return;
+    this._engine.setDiagnosticsVisible(!!(this._config && this._config.show_diagnostics));
   }
 
   _fallbackNode(text) {
@@ -326,7 +475,22 @@ class ThreeDModelCard extends HTMLElement {
 
   getCardSize() {
     const px = this._heightPx();
-    return Math.max(3, Math.round(px / 50));
+    // Явная высота — относительный «вес» карточки в «кирпичной» раскладке:
+    // 1 = 50 px (как и раньше).
+    if (px !== null) return Math.max(3, Math.round(px / 50));
+    // Высота не задана — карточка занимает доступную область, а до раскладки
+    // Lovelace резервирует место по рекомендации модели (см. _applyHeight).
+    return Math.max(3, Math.round(this._recommendedHeightPx() / 50));
+  }
+
+  /**
+   * Размер клетки в сетке разделов (Sections). Карточка занимает клетку
+   * целиком: 6 строк ≈ 376 px — близко к рекомендованным моделью 400–480 px;
+   * пользователь меняет размер в редакторе раскладки (там же есть «auto
+   * height» — тогда высоту задаёт сама карточка).
+   */
+  getGridOptions() {
+    return { columns: 12, min_columns: 6, rows: 6, min_rows: 3, max_rows: 16 };
   }
 
   /** Lovelace: конфигурация по умолчанию при добавлении карточки. */
@@ -356,17 +520,6 @@ function legacyModelId(config) {
     "custom:production-room-3d-card": "production-room",
   };
   return map[type] || null;
-}
-
-/** Сравнить model_assets (ключ → id): любое отличие — повод пересобрать сцену. */
-function modelAssetsEqual(a, b) {
-  const ka = a && typeof a === "object" ? Object.keys(a) : [];
-  const kb = b && typeof b === "object" ? Object.keys(b) : [];
-  if (ka.length !== kb.length) return false;
-  for (const k of ka) {
-    if (String((b && typeof b === "object" ? b[k] : undefined) ?? "") !== String(a[k] ?? "")) return false;
-  }
-  return true;
 }
 
 api.CardClass = ThreeDModelCard;

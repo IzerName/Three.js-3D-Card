@@ -19,7 +19,7 @@
 //    });
 // ============================================================================
 
-import { loadGeometryEx, normalizeSource, releaseAssetUrls } from "./geometry.js";
+import { loadGeometryEx, normalizeSource } from "./geometry.js";
 import { createRuleEngine } from "./object-rules.js";
 import { normalizeBindings, normalizeParams } from "./bindings.js";
 import { clamp, prefersReducedMotion } from "./util.js";
@@ -133,31 +133,19 @@ export function createObjectModel(def) {
    * не пустые поля без следа: возвращается предупреждение, которое
    * редактор показывает в блоке привязок.
    *
-   * @param {object} [ctx] контекст: asset(), modelAssets, assetFile(),
-   *   fetch (произвольная, для тестов).
+   * @param {object} [ctx] контекст: asset(), fetch (произвольная, для тестов).
    * @returns {Promise<{bindings: Array, warnings: Array}>}
    */
   async function discoverBindings(ctx = {}) {
-    let file = null; // из хранилища браузера — revoke в finally
     try {
       const source = normalizeSource(
         def.source,
         ctx.asset ? ctx.asset(".") : undefined,
-        ctx.modelAssets || null,
       );
       if (source.format !== "gltf") {
         throw new Error("bindingsFrom.gltfExtras: доступны только для glTF/GLB-моделей");
       }
-      let readUrl = source.url;
-      if (source.isAsset && ctx.assetFile) {
-        // Файл из хранилища браузера (T-010): берём временный URL.
-        file = await ctx.assetFile(source.assetId);
-        if (!file) {
-          throw new Error(`файл модели «${source.url}» загружен в другом браузере — привязки из extras прочитать нельзя`);
-        }
-        readUrl = file.url;
-      }
-      const nodes = await readGltfExtras(readUrl, ctx.fetch);
+      const nodes = await readGltfExtras(source.url, ctx.fetch);
       const res = extrasToBindings(nodes);
       return {
         bindings: res.bindings.map((b, i) => toEditorExtrasBinding(b, i)),
@@ -165,8 +153,6 @@ export function createObjectModel(def) {
       };
     } catch (e) {
       return { bindings: [], warnings: [e && e.message ? e.message : String(e)] };
-    } finally {
-      if (file && file.revoke) { try { file.revoke(); } catch (e2) { /* noop */ } }
     }
   }
 
@@ -174,10 +160,12 @@ export function createObjectModel(def) {
     manifest,
     bindings: editorBindings,
     params: def.params || [],
-    defaults: def.defaults || { config: { title: manifest.name, show_hud: true, height: 460 } },
-    // Источник геометрии из спека (для редактора: показать ожидаемый путь
-    // и ключ model_assets). Реестр моделей своё поле .source перезаписывает
-    // маркером источника, поэтому имя у нас другое.
+    // Высоту карточки по умолчанию не задаём: без `height` она занимает всю
+    // доступную область, а рекомендация для раскладки — manifest.size.
+    defaults: def.defaults || { config: { title: manifest.name, show_hud: true } },
+    // Источник геометрии из спека (для редактора: показать ожидаемый путь).
+    // Реестр моделей своё поле .source перезаписывает маркером источника,
+    // поэтому имя у нас другое.
     fileSource: def.source,
     ...(extrasMode ? { discoverBindings } : {}),
 
@@ -203,12 +191,9 @@ export function createObjectModel(def) {
 
     async create(ctx) {
       const THREE = ctx.THREE;
-      // model_assets — из «сырой» конфигурации панели (ctx.modelAssets):
-      // файлы из хранилища браузера подставляются вместо путей в спеке (T-010).
       const source = normalizeSource(
         def.source,
         ctx.asset ? ctx.asset(".") : undefined,
-        ctx.modelAssets || null,
       );
 
       // T-013: вместе с клон-деревом получаем клипы glTF; миксер живёт на
@@ -307,13 +292,15 @@ export function createObjectModel(def) {
           // возвращаются к исходным (engine.dispose делает то же, дубли
           // безвредны).
           if (mixer) mixer.stopAllAction();
-          // Отозвать blob: URL ассетов, если модель читала файлы из
-          // хранилища браузера (T-010). Геометрия в общем кэше при этом
-          // не сбрасывается: повторная загрузка возьмёт у хранилища новый URL.
-          releaseAssetUrls(group);
           // Геометрии и текстуры — общие для всех сцен (кэш), их не трогаем;
-          // освобождаем только собственные копии материалов.
+          // освобождаем только собственные копии материалов и те геометрии,
+          // которые правила завели себе сами (створка с петлёй — см.
+          // prepareHinge: перенос необратим, поэтому копия обязана быть своей).
           group.traverse((n) => {
+            if (n.isMesh && n.userData && n.userData._t3dOwnGeometry
+                && n.geometry && n.geometry.dispose) {
+              n.geometry.dispose();
+            }
             if (n.isMesh && n.material) {
               const list = Array.isArray(n.material) ? n.material : [n.material];
               for (const m of list) {

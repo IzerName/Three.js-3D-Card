@@ -16,7 +16,9 @@ const CSS = `
 .t3d-overlay > * { pointer-events: none; }
 .t3d-overlay button, .t3d-overlay input, .t3d-modal-backdrop { pointer-events: auto; }
 
-.t3d-hud { position: absolute; left: 12px; top: 10px; max-width: calc(100% - 24px); }
+/* HUD выше панели диагностики (z-index 5) — страховка от перекрытия текста
+   даже если панель окажется в верхней полосе (T-018). */
+.t3d-hud { position: absolute; left: 12px; top: 10px; max-width: calc(100% - 24px); z-index: 6; }
 .t3d-hud-title { font-size: 14px; font-weight: 650; letter-spacing: .2px;
   text-shadow: 0 1px 6px rgba(0,0,0,.55); }
 .t3d-hud-sub { font-size: 11px; opacity: .75; margin-top: 2px; text-shadow: 0 1px 5px rgba(0,0,0,.5); }
@@ -38,6 +40,9 @@ const CSS = `
   color: var(--text-primary-color, #fff); }
 .t3d-btn-primary:hover { filter: brightness(1.1); }
 
+/* Панель диагностики (T-018): по умолчанию скрыта — движок выставляет
+   display:none, пока не включена show_diagnostics. top — CSS-фолбэк: когда
+   вёрстку удаётся измерить, движок ставит панель ниже HUD карточки и модели. */
 .t3d-diag { position: absolute; left: 12px; top: 12px; right: 12px; max-height: calc(100% - 24px); overflow: auto;
   background: var(--card-background-color, rgba(14,18,24,.94));
   border: 1px solid var(--divider-color, rgba(120,140,170,.3)); border-radius: 12px;

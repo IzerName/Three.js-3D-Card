@@ -30,6 +30,15 @@ import { createCameraControls } from "./camera-controls.js";
 
 const MAX_PIXEL_RATIO = 2;
 
+/** Зазор между надписями верхней полосы карточки и панелью диагностики (T-018). */
+const DIAG_GAP = 8;
+/**
+ * Верхняя полоса карточки (T-018), в которой ищутся надписи, которые панель
+ * диагностики не должна перекрывать: HUD карточки и HUD модели начинаются от
+ * `top: 10px`, поэтому полосы в 64 px хватает с запасом.
+ */
+const DIAG_TOP_BAND = 64;
+
 /**
  * Привести точку ориентира (THREE.Vector3, [x, y, z] или {x, y, z}) к обычному
  * объекту без обращений к three.js — чтобы исходный вид внешней камеры
@@ -72,10 +81,6 @@ export class SceneEngine {
     this.onDeepLink = opts.onDeepLink || null;
     this.onStatus = opts.onStatus || null;
 
-    // Хранилище файлов моделей в браузере (T-010): передаёт карточка;
-    // null — файлов нет, поведение как раньше.
-    this._assetStore = (opts && opts.assetStore) || null;
-
     this.running = false;
     this.disposed = false;
     this.visible = true;
@@ -88,6 +93,9 @@ export class SceneEngine {
     this._syncedVersion = -1;
     this._lastReportedVersion = -1;
     this.openKey = null;
+    // Панель диагностики строится всегда, но по умолчанию скрыта (T-018):
+    // пустой прямоугольник поверх сцены закрывал HUD и перехватывал ввод.
+    this._diagVisible = false;
     this._listeners = [];
     this._modelHandle = null;
     this._camControls = null;
@@ -437,36 +445,14 @@ export class SceneEngine {
 
       asset(relative) {
         // T-011: _sourceUrl — базовый URL для относительных путей спеки.
-        // Для моделей asset:<имя>.json это «asset:…», а не файл: как база
-        // для new URL() он сломал бы пути (asset:../x.obj). Поэтому базой
-        // служит только реальный URL (http(s)://, /, ./), иначе — страница.
+        // Базой служит только реальный URL (http(s)://, /, ./): у модели без
+        // сетевого пути относительные пути разрешаются от страницы.
         const raw = (engine.model && engine.model._sourceUrl) || "";
         const base =
           /^https?:\/\//i.test(raw) || raw.startsWith("/") || raw.startsWith("./")
             ? raw
             : document.baseURI;
         try { return new URL(relative, base).href; } catch (e) { return relative; }
-      },
-
-      // Файлы моделей из хранилища браузера (T-010). Читается из
-      // panelConfig — «сырой» конфигурации: _buildConfig() неизвестные
-      // поля не пробрасывает, а model_assets поле карточки, а не модели.
-      get modelAssets() {
-        return (self.panelConfig && self.panelConfig.model_assets) || null;
-      },
-      /**
-       * URL файла ассета для загрузчика three.js.
-       * @returns {Promise<{url, revoke}|null>} null — хранилище недоступно
-       *         или ассета в этом браузере нет (loadGeometry тогда выдаст
-       *         понятную ошибку в диагностике).
-       */
-      async assetFile(id) {
-        if (!self._assetStore) return null;
-        try {
-          return await self._assetStore.objectUrl(id);
-        } catch (e) {
-          return null;
-        }
       },
 
       makeLabel: (text, o) => self.makeLabel(text, o),
@@ -739,6 +725,61 @@ export class SceneEngine {
     this._needsRender = true;
   }
 
+  /**
+   * Текущий вид камеры — для сохранения при пересоздании сцены.
+   *
+   * Home Assistant в режиме предпросмотра (окно редактирования карточки)
+   * пересоздаёт элемент карточки на каждое изменение конфигурации
+   * (hui-card: `typeChanged || this.preview` → `_loadElement`), поэтому без
+   * сохранения вида камера возвращалась бы к виду по умолчанию после каждого
+   * символа, введённого в редакторе. Возвращается простой объект (без three.js),
+   * чтобы его можно было передать между экземплярами сцены.
+   */
+  getView() {
+    const v = this._camControls && typeof this._camControls.getView === "function"
+      ? this._camControls.getView()
+      : null;
+    if (v && v.target) {
+      return { target: [v.target.x, v.target.y, v.target.z], radius: v.radius, phi: v.phi, theta: v.theta };
+    }
+    const c = this.camState;
+    return { target: [c.target.x, c.target.y, c.target.z], radius: c.radius, phi: c.phi, theta: c.theta };
+  }
+
+  /**
+   * Восстановить вид камеры (после пересоздания сцены). Модель может
+   * распоряжаться камерой сама — тогда спрашиваем её (handle.setView).
+   * @returns {boolean} удалось ли применить вид
+   */
+  setView(view) {
+    if (!view || !Array.isArray(view.target) || !this.THREE) return false;
+    const hd = this._modelHandle;
+    if (hd && typeof hd.setView === "function") {
+      try { if (hd.setView(view) !== false) return true; } catch (e) { this._reportError("setView", e); }
+    }
+    if (this._camControls && typeof this._camControls.setView === "function") {
+      this._camControls.setView({
+        target: new this.THREE.Vector3(view.target[0] || 0, view.target[1] || 0, view.target[2] || 0),
+        radius: view.radius,
+        phi: view.phi,
+        theta: view.theta,
+      });
+    }
+    // camState — зеркало вида (его читают _applyCameraDrift и _updateCamera),
+    // поэтому обновляем и его; у внешних моделей своей камерой распоряжается
+    // движок модели, и трогать camState нельзя.
+    if (!this._externalHost && this.camera && this.camState && this.camState.target) {
+      const c = this.camState;
+      c.target.set(view.target[0] || 0, view.target[1] || 0, view.target[2] || 0);
+      if (Number.isFinite(view.radius)) c.radius = view.radius;
+      if (Number.isFinite(view.phi)) c.phi = view.phi;
+      if (Number.isFinite(view.theta)) c.theta = view.theta;
+      this._updateCamera();
+    }
+    this._needsRender = true;
+    return true;
+  }
+
   resize() { this._resizeRenderer(); }
 
   _resizeRenderer() {
@@ -755,6 +796,9 @@ export class SceneEngine {
     if (this._modelHandle && this._modelHandle.resize) {
       try { this._modelHandle.resize(w, h, this.config); } catch (e) { this._reportError("resize", e); }
     }
+    // (T-018) при другой ширине заголовок HUD может перенестись на другую
+    // строку — панель диагностики пересчитывает своё место.
+    if (this._diagVisible) this._placeDiagnostics();
     this._needsRender = true;
   }
 
@@ -999,22 +1043,29 @@ export class SceneEngine {
     this._overlay = root;
     this._updateHud();
     this._renderStatus();
+    // (T-018) панель диагностики создаётся всегда, но показывается только по
+    // флагу show_diagnostics: в скрытом состоянии от неё не остаётся пустого
+    // прямоугольника поверх сцены.
+    this._renderDiagnostics();
   }
 
   _updateHud() {
     if (!this._hud) return;
     const show = this.config.showHud;
     this._hud.style.display = show ? "" : "none";
-    if (!show) return;
-
-    if (!this._hudTitle) {
-      this._hudTitle = document.createElement("div");
-      this._hudTitle.className = "t3d-hud-title";
-      this._hud.insertBefore(this._hudTitle, this._hudSub);
+    if (show) {
+      if (!this._hudTitle) {
+        this._hudTitle = document.createElement("div");
+        this._hudTitle.className = "t3d-hud-title";
+        this._hud.insertBefore(this._hudTitle, this._hudSub);
+      }
+      const title = this.config.title;
+      this._hudTitle.textContent = title || "";
+      this._hudTitle.style.display = title ? "" : "none";
     }
-    const title = this.config.title;
-    this._hudTitle.textContent = title || "";
-    this._hudTitle.style.display = title ? "" : "none";
+    // (T-018) заголовок мог стать длиннее (или HUD скрыли) — панель
+    // диагностики пересчитывает своё место от новой высоты верхней полосы.
+    if (this._diagVisible) this._placeDiagnostics();
   }
 
   /** Подпись под заголовком в HUD (используется моделями и демо-режимом). */
@@ -1066,7 +1117,8 @@ export class SceneEngine {
   }
 
   setDiagnosticsVisible(v) {
-    if (!this._diag) return;
+    // Флаг хранится и тогда, когда панели ещё нет: оверлей строится в
+    // _buildOverlay() и сразу получает нужное состояние (T-018).
     this._diagVisible = !!v;
     this._renderDiagnostics();
   }
@@ -1076,6 +1128,8 @@ export class SceneEngine {
     if (!this._diagVisible) { this._diag.style.display = "none"; return; }
     const d = this.diagnostics();
     this._diag.style.display = "";
+    // (T-018) панель показывается ниже надписей верхней полосы карточки.
+    this._placeDiagnostics();
     const icon = d.errors.length ? "⛔" : d.warnings.length ? "⚠️" : "✅";
     this._diag.innerHTML =
       `<div class="t3d-diag-title">${icon} ${esc(d.model.name)} · v${esc(d.version)}</div>` +
@@ -1088,6 +1142,58 @@ export class SceneEngine {
           `<span class="t3d-diag-msg">${esc(r.message)}</span></div>`;
       }).join("") +
       (d.log.length ? `<div class="t3d-diag-log">${d.log.map((l) => esc(l)).join("<br>")}</div>` : "");
+  }
+
+  /**
+   * (T-018) Поставить панель диагностики ниже надписей верхней полосы карточки,
+   * чтобы она никогда их не перекрывала: под ней не должно оставаться ни HUD
+   * карточки, ни собственного HUD модели (у host: "external" он свой DOM-слой,
+   * например подпись «— · 3 200 mV» у бака).
+   *
+   * Верх считается по измеренной нижней границе этих надписей; когда измерить
+   * нечего (HUD скрыт, вёрстка ещё не посчитана, нет getBoundingClientRect),
+   * остаётся CSS-значение `.t3d-diag { top: 12px }` — панель выше, но в этой
+   * полосе надписей и нет.
+   */
+  _placeDiagnostics() {
+    const diag = this._diag;
+    if (!diag) return;
+    const bottom = this._topStripBottom();
+    if (!bottom) {
+      diag.style.top = "";
+      diag.style.maxHeight = "";
+      return;
+    }
+    const top = Math.round(bottom + DIAG_GAP);
+    diag.style.top = `${top}px`;
+    // Низким карточкам оставляем снизу тот же отступ, что и в CSS (12px).
+    const height = this.container.clientHeight || 0;
+    diag.style.maxHeight = height ? `calc(100% - ${top + 12}px)` : "";
+  }
+
+  /**
+   * Нижняя граница видимых надписей в верхней полосе контейнера (T-018):
+   * берутся небольшие блоки, начинающиеся у верхней кромки, а полноэкранные
+   * слои (канвас, `.t3d-overlay`, слои моделей) и сама панель пропускаются.
+   * Возвращает 0, если измерить нечего.
+   */
+  _topStripBottom() {
+    const container = this.container;
+    const base = container && container.getBoundingClientRect ? container.getBoundingClientRect() : null;
+    if (!base || !base.height) return 0;
+    const nodes = container.querySelectorAll ? container.querySelectorAll("*") : [];
+    let bottom = 0;
+    for (const node of nodes) {
+      if (node === this._diag || (this._diag && this._diag.contains && this._diag.contains(node))) continue;
+      if (typeof node.getBoundingClientRect !== "function") continue;
+      const rect = node.getBoundingClientRect();
+      const height = rect.height || 0;
+      if (!height || height > base.height / 2) continue;         // полноэкранные слои
+      const top = (rect.top || 0) - (base.top || 0);
+      if (top < 0 || top > DIAG_TOP_BAND) continue;              // не верхняя полоса
+      bottom = Math.max(bottom, top + height);
+    }
+    return bottom;
   }
 
   _report(level, message) {

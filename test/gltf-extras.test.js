@@ -469,27 +469,6 @@ test("discoverBindings: не glTF-модель — предупреждение,
   assert.match(disc.warnings[0], /доступны только для glTF\/GLB/);
 });
 
-test("discoverBindings: файл из хранилища браузера (assetFile), revoke в finally", async () => {
-  const { createObjectModel } = await import("../src/core/object-model.js");
-  let revokes = 0;
-  const model = createObjectModel({
-    manifest: { id: "extras-asset", name: "Asset" },
-    source: { format: "gltf", url: "extras.gltf" },
-    bindingsFrom: { gltfExtras: true },
-  });
-  const disc = await model.discoverBindings({
-    asset: (rel) => new URL(rel, "http://unit.local/").href,
-    modelAssets: { "extras.gltf": "t3d-asset-1" },
-    assetFile: async (id) => ({ url: `mem://asset/${id}`, revoke: () => { revokes++; } }),
-    fetch: async (reqOrUrl) => {
-      const u = typeof reqOrUrl === "string" ? reqOrUrl : String(reqOrUrl.url);
-      return u.startsWith("mem://") ? new Response(fixtureText, { status: 200 }) : new Response("", { status: 200 });
-    },
-  });
-  assert.equal(disc.bindings.length, 5, "ассет читается как обычный файл");
-  assert.equal(revokes, 1, "временный URL отозван");
-});
-
 // ---- e2e: GLTFLoader + SceneEngine + состояния --------------------------------
 //
 // object-model.js берём из dist/src/core: только там литеральный динамический

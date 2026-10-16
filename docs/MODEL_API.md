@@ -10,11 +10,12 @@
 
 Моделью может быть и **файл данных** — одна JSON-спецификация
 (`manifest`/`source`/`bindings`, см. `docs/OBJECT_MODEL.md`): JS-обёртка
-необязательна, карточка собирает сцену из спецификации сама. Файл может лежать
-на сервере HA (`model: /local/3d/room.json`) либо загружаться в редакторе
-карточки — тогда он хранится в **хранилище файлов браузера**, а конфигурация
-ссылается на него схемой `asset:` (`model: asset:room.json`, `model_assets`;
-подробности — `docs/CONFIGURATION.md`).
+необязательна, карточка собирает сцену из спецификации сама. Оба файла — и код
+модели, и спецификация — лежат на сервере HA, в `config/www/3d-models/`
+(браузеру эта папка отдаётся как `/local/`), и указываются путём:
+`model: /local/3d-models/room.json`. Геометрия и материалы подключаются только
+из спецификации или из кода модели — подробности и способы доставки файлов на
+сервер в `docs/CONFIGURATION.md`.
 
 ```
                  manifest.js / model.js
@@ -102,9 +103,8 @@ entities:
 `/local/3d-models/my-box.js`.
 
 Модель без JavaScript — один `.json`-файл (спецификация):
-`model: /local/3d/room.json` или `model: asset:room.json` (файл, загруженный
-в редакторе карточки). Такой файл **никогда не исполняется**: реестр парсит
-его через `JSON.parse` и собирает модель фабрикой объектной модели
+`model: /local/3d-models/room.json`. Такой файл **никогда не исполняется**:
+реестр парсит его через `JSON.parse` и собирает модель фабрикой объектной модели
 (`docs/OBJECT_MODEL.md`). Относительные пути внутри спецификации
 (`source.url`, `source.mtl`) разрешаются от каталога `.json`-файла. Кодовая
 обёртка нужна только когда спецификации мало — в этом случае грузить геометрию
@@ -150,7 +150,7 @@ glTF-клипы (список клипов из файла нужен, напр�
 | `author` | string | нет | Автор модели. |
 | `camera` | object | нет | Начальное положение камеры (см. ниже). |
 | `environment` | object | нет | Пол, свет, тени. |
-| `size` | object | нет | `{ defaultHeight, minHeight, maxHeight }` — рекомендуемая высота карточки в пикселях. |
+| `size` | object | нет | `{ defaultHeight, minHeight, maxHeight }` — рекомендуемая высота карточки в пикселях (берётся, когда в конфигурации не задан `height`). |
 
 ### `manifest.camera`
 
@@ -479,7 +479,7 @@ document.querySelector("threejs-3d-card")._engine.diagnostics();  // состо�
       { key: "color", name: "Цвет", type: "theme-color", default: "var(--primary-color)" },
     ],
 
-    defaults: { config: { title: "Шаблон", show_hud: true, height: 380 } },
+    defaults: { config: { title: "Шаблон", show_hud: true } },
 
     create(ctx) {
       // three.js всегда доступен через контекст — брать его на верхнем уровне файла нельзя

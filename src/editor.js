@@ -18,7 +18,6 @@ import {
   normalizeBindings, normalizeParams, groupBindings, validateBindings, readValue,
 } from "./core/bindings.js";
 import { prettyState, stateWithUnit, isAvailable } from "./core/state.js";
-import { getSharedAssetStore } from "./core/asset-store.js";
 import { mergeEditorBindings } from "./core/gltf-extras.js";
 import { esc } from "./core/util.js";
 import { buildStubConfig } from "./core/stub.js";
@@ -37,20 +36,24 @@ export class ThreeDModelCardEditor extends HTMLElement {
     this._rows = [];
     this._builtin = [];
     this._root = null;
+    this._rendered = false;
+    this._renderedKey = "";
+    this._schemaVersion = 0;
     this._manualEntity = new Set(); // ключи, для которых включён ручной ввод
-    // Файлы моделей в хранилище браузера (T-010).
-    this._assetStore = null;   // экземпляр AssetStore или null (нет IndexedDB)
-    this._assets = null;       // список загруженных файлов (null — ещё не читали)
-    this._assetNote = null;    // разовое сообщение в секции файлов
-    this._assetsLoading = false;
   }
 
   // ---- входные данные ------------------------------------------------------
 
   setConfig(config) {
-    this._config = Object.assign({}, config || {});
-    if (!this._config.model) this._config.model = "water-tank";
-    this._render();
+    const next = Object.assign({}, config || {});
+    if (!next.model) next.model = "water-tank";
+    this._config = next;
+    // Форму перерисовываем ТОЛЬКО если изменилось то, что она показывает.
+    // HA присылает редактору назад его же конфиг после каждого
+    // config-changed (и при каждом обновлении hass): полная перерисовка
+    // (innerHTML = "") уничтожала поле вместе с фокусом — ввод срывался
+    // после первого же символа.
+    this._renderIfNeeded();
     this._loadModel();
   }
 
@@ -64,8 +67,12 @@ export class ThreeDModelCardEditor extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
-    if (first) this._render();
-    else this._refreshStates();
+    if (first) {
+      // Без hass не создать ha-entity-picker — форму собираем заново.
+      this._renderIfNeeded(true);
+    } else {
+      this._refreshStates();
+    }
   }
 
   get hass() {
@@ -73,9 +80,8 @@ export class ThreeDModelCardEditor extends HTMLElement {
   }
 
   connectedCallback() {
-    if (!this._root) this._render();
+    if (!this._root) this._renderIfNeeded(true);
     this._loadBuiltin();
-    this._loadAssets();
   }
 
   // ---- загрузка моделей ----------------------------------------------------
@@ -84,7 +90,7 @@ export class ThreeDModelCardEditor extends HTMLElement {
     if (this._builtin.length) return;
     try {
       this._builtin = await listBuiltin();
-      this._render();
+      this._renderIfNeeded();
     } catch (e) {
       console.warn("[threejs-3d-card] список встроенных моделей недоступен", e);
     }
@@ -97,19 +103,21 @@ export class ThreeDModelCardEditor extends HTMLElement {
     this._modelLoading = true;
     this._discovering = false;
     this._extrasNotes = null;
-    this._render();
+    this._renderIfNeeded(true);
     try {
       this._model = await registry.resolve(id, {
         force: !!this._config.reload_model,
         allowExternal: this._config.allow_external_models !== false,
       });
       this._modelError = null;
+      // У модели другая схема привязок и параметров — форма строится заново.
+      this._schemaVersion = (this._schemaVersion || 0) + 1;
       // T-012: у модели привязки из extras файла — читаем файл ДО показа
       // формы (без сцены, без three.js). Нечитаемый файл — предупреждение
       // в блоке привязок, а не молча пустые поля.
       if (this._model && typeof this._model.discoverBindings === "function") {
         this._discovering = true;
-        this._render();
+        this._renderIfNeeded(true);
         let disc = { bindings: [], warnings: [] };
         try {
           disc = await this._model.discoverBindings(this._discoverCtx());
@@ -135,13 +143,14 @@ export class ThreeDModelCardEditor extends HTMLElement {
     }
     this._modelLoading = false;
     this._discovering = false;
-    this._render();
+    // Модель загружена (или не загрузилась) — показываем форму целиком.
+    this._renderIfNeeded(true);
     this._refreshStates();
   }
 
   /**
    * T-012: ctx для discoverBindings — тот же контракт, что контекст сцены
-   * (см. src/core/scene.js): asset(), modelAssets, assetFile().
+   * (см. src/core/scene.js): asset().
    */
   _discoverCtx() {
     return {
@@ -152,172 +161,78 @@ export class ThreeDModelCardEditor extends HTMLElement {
           : (typeof document !== "undefined" ? document.baseURI : undefined);
         try { return new URL(rel, base).href; } catch (e) { return rel; }
       },
-      modelAssets: this._config.model_assets || null,
-      assetFile: this._assetStore ? (id) => this._assetStore.objectUrl(id) : undefined,
       fetch: undefined,
     };
   }
 
-  // ---- файлы моделей: хранилище браузера (T-010) ----------------------------
-  //
-  // Пользователь выбирает (или перетаскивает) .glb/.gltf/.obj/.mtl — файл
-  // сохраняется в IndexedDB БРАУЗЕРА, на сервер ничего не уходит. В конфиг
-  // попадает только model_assets: { "имя.файла": "t3d-asset-…" }, а сцена
-  // читает файл по id из того же хранилища.
+  // ---- рендер --------------------------------------------------------------
 
-  /** Прочитать список файлов из хранилища (нет IndexedDB — тихо). */
-  async _loadAssets() {
-    if (this._assetsLoading) return;
-    this._assetsLoading = true;
-    try {
-      const store = getSharedAssetStore();
-      this._assetStore = store;
-      this._assets = store ? await store.list() : null;
-    } catch (e) {
-      this._assets = null;
-    }
-    this._assetsLoading = false;
-    if (this._root) this._render();
+  /**
+   * Отпечаток того, ЧТО показывает форма (значения полей).
+   *
+   * Home Assistant присылает редактору назад тот же конфиг, который тот только
+   * что отдал (hui-element-editor: `_handleUIConfigChanged` → `value` →
+   * `setConfig`), и делает это на каждое изменение и на каждое обновление hass.
+   * Редактор обязан быть идемпотентным: полная перерисовка (`innerHTML = ""`)
+   * уничтожает поле вместе с фокусом, поэтому при неизменном отпечатке форму
+   * не трогаем — иначе после первого же символа ввод срывается.
+   */
+  _formKey(cfg) {
+    const c = cfg || {};
+    return canonicalJson({
+      model: c.model,
+      model_url: c.model_url,
+      reload_model: c.reload_model,
+      title: c.title,
+      height: c.height,
+      show_hud: c.show_hud,
+      show_diagnostics: c.show_diagnostics,
+      allow_external_models: c.allow_external_models,
+      entities: c.entities || {},
+      params: c.params || {},
+      camera: c.camera,
+    });
+  }
+
+  /** Отпечаток того, КАКИЕ поля есть в форме (структура, а не значения). */
+  _structureKey() {
+    const c = this._config || {};
+    return [
+      c.model || "",
+      this._schemaVersion || 0,
+      this._modelLoading ? "loading" : "",
+      this._discovering ? "discovering" : "",
+      this._modelError || "",
+      (this._extrasNotes || []).join("|"),
+      this._builtin.map((m) => (m.manifest ? m.manifest.id : "")).join(","),
+      isUrl(c.model) ? "url" : "",
+      [...this._manualEntity].sort().join(","),
+    ].join("§");
   }
 
   /**
-   * Сохранить выбранные файлы и прописать их в model_assets.
-   * @param {Array|FileList} fileList
+   * Перерисовать форму, только если изменилось то, что она показывает.
+   * @param {boolean} [force] перерисовать безусловно (новое hass, смена модели)
+   * @returns {boolean} рисовали ли заново
    */
-  async _uploadFiles(fileList) {
-    const store = this._assetStore || getSharedAssetStore();
-    if (!store) {
-      this._assetNote = "Хранилище браузера (IndexedDB) недоступно — сохранить файлы нельзя.";
-      this._render();
-      return;
-    }
-    this._assetStore = store;
-    // Формат определяется по расширению — берём только поддерживаемые.
-    const files = [];
-    for (const f of fileList || []) {
-      // .json — спецификация модели (T-011): в поле «Модель» пишется
-      // model: asset:<имя>.json, файл в код не превращаем, он данные.
-      if (f && /\.(glb|gltf|obj|mtl|json)$/i.test(String(f.name || ""))) files.push(f);
-    }
-    if (!files.length) {
-      this._assetNote = "Поддерживаются файлы .glb, .gltf, .obj, .mtl и .json (спецификация модели).";
-      this._render();
-      return;
-    }
-    this._assetNote = null;
-    try {
-      const map = Object.assign({}, (this._config && this._config.model_assets) || {});
-      for (const f of files) {
-        const rec = await store.put(f);
-        map[rec.name] = rec.id;
-      }
-      this._assets = await store.list();
-      // reload_model — чтобы карточка пересобрала сцену с новым файлом.
-      this._patch({ model_assets: map, reload_model: true });
-    } catch (e) {
-      this._assetNote = `Не удалось сохранить файлы: ${e.message}`;
-      this._render();
-    }
+  _renderIfNeeded(force = false) {
+    if (!this._config) return false;
+    const key = this._key();
+    if (!force && this._rendered && key === this._renderedKey) return false;
+    const drew = this._render();
+    if (drew) this._renderedKey = this._key();
+    return drew;
   }
 
-  /** Удалить файл из хранилища и убрать все ключи model_assets, что на него указывают. */
-  async _removeAsset(id) {
-    const store = this._assetStore;
-    if (!store) return;
-    try { await store.remove(id); } catch (e) { /* ignore */ }
-    try { this._assets = await store.list(); } catch (e) { this._assets = null; }
-    const map = Object.assign({}, (this._config && this._config.model_assets) || {});
-    let changed = false;
-    for (const k of Object.keys(map)) {
-      if (String(map[k]) === String(id)) { delete map[k]; changed = true; }
-    }
-    if (changed) {
-      this._patch({
-        model_assets: Object.keys(map).length ? map : undefined,
-        reload_model: true,
-      });
-    } else {
-      this._render();
-    }
+  /** Текущий отпечаток формы (структура + значения). */
+  _key() {
+    return `${this._structureKey()}§${this._formKey(this._config)}`;
   }
-
-  /** Секция «Файлы моделей» в форме редактора. */
-  _assetBlock(c) {
-    const block = el("div", "t3d-ed-block");
-    block.appendChild(el("div", "t3d-ed-h", "Файлы моделей (в браузере)"));
-    block.appendChild(el("div", "t3d-ed-sub",
-      "Файлы сохраняются в хранилище этого браузера (IndexedDB) и НЕ отправляются на сервер. " +
-      "В конфигурации хранится только идентификатор файла; формат определяется по его имени."));
-
-    // Скрытый input + кнопка выбора.
-    const fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.accept = ".glb,.gltf,.obj,.mtl,.json";
-    fileInput.multiple = true;
-    fileInput.style.display = "none";
-    fileInput.addEventListener("change", () => {
-      this._uploadFiles(fileInput.files || []);
-      fileInput.value = "";
-    });
-    block.appendChild(fileInput);
-
-    const pickBtn = document.createElement("button");
-    pickBtn.className = "t3d-ed-btn";
-    pickBtn.type = "button";
-    pickBtn.textContent = "Выбрать файлы…";
-    pickBtn.addEventListener("click", () => { if (fileInput.click) fileInput.click(); });
-    block.appendChild(pickBtn);
-
-    // Зона drag&drop.
-    const drop = el("div", "t3d-ed-drop",
-      "…или перетащите сюда файлы .glb / .gltf / .obj / .mtl / .json (спека модели)");
-    drop.addEventListener("dragover", (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); });
-    drop.addEventListener("drop", (ev) => {
-      if (ev && ev.preventDefault) ev.preventDefault();
-      const files = (ev && ev.dataTransfer && ev.dataTransfer.files) || [];
-      this._uploadFiles(files);
-    });
-    block.appendChild(drop);
-
-    if (this._assetNote) block.appendChild(el("div", "t3d-ed-note t3d-ed-warn", this._assetNote));
-
-    // Список сохранённых файлов.
-    const list = this._assets || [];
-    if (this._assetStore && !list.length) {
-      block.appendChild(el("div", "t3d-ed-note", "Сохранённых файлов пока нет."));
-    }
-    for (const rec of list) {
-      const row = el("div", "t3d-ed-asset");
-      row.appendChild(el("div", "t3d-ed-asset-info", `${rec.name} · ${formatSize(rec.size)}`));
-      const rm = document.createElement("button");
-      rm.className = "t3d-ed-btn t3d-ed-btn-sm";
-      rm.type = "button";
-      rm.textContent = "Удалить";
-      rm.addEventListener("click", () => this._removeAsset(rec.id));
-      row.appendChild(rm);
-      block.appendChild(row);
-    }
-
-    // Файл в конфигурации, которого нет в хранилище этого браузера (T-010):
-    // тот же текст, что в диагностике карточки.
-    if (this._assets !== null && c && c.model_assets && typeof c.model_assets === "object") {
-      const ids = new Set(list.map((a) => String(a.id)));
-      for (const [key, id] of Object.entries(c.model_assets)) {
-        if (!ids.has(String(id))) {
-          block.appendChild(el("div", "t3d-ed-note t3d-ed-error",
-            `Файл модели «${key}» загружен в другом браузере — загрузите его снова в редакторе`));
-        }
-      }
-    }
-    return block;
-  }
-
-  // ---- рендер --------------------------------------------------------------
 
   _render() {
     // connectedCallback вызывает _render() до setConfig — рисовать нечего.
-    if (!this._config) return;
-    if (!this.isConnected && this._rendered) return;
+    if (!this._config) return false;
+    if (!this.isConnected && this._rendered) return false;
     const shadow = this.shadowRoot || (this.attachShadow ? this.attachShadow({ mode: "open" }) : null);
     this._shadow = shadow;
     const host = shadow || this;
@@ -398,8 +313,13 @@ export class ThreeDModelCardEditor extends HTMLElement {
       modelBlock.appendChild(field(
         "URL модели",
         box,
-        "Файл модели на сервере Home Assistant, например /local/3d-models/my-model.js. " +
-        "Модель должна вызвать window.ThreeJS3DCard.defineModel({…}) — см. docs/MODEL_API.md."
+        "Файлы моделей лежат на сервере Home Assistant в config/www/3d-models " +
+        "(URL — /local/3d-models/, положить файлы можно через Samba, File editor, SSH " +
+        "или Studio Code Server). В поле указывается путь к коду модели .js — он должен " +
+        "вызвать window.ThreeJS3DCard.defineModel({…}), см. docs/MODEL_API.md — либо к " +
+        "спецификации .json. Геометрия (.glb/.gltf, .obj + .mtl, текстуры) кладётся рядом " +
+        "и прописывается внутри спецификации относительным путём: напрямую .glb/.obj в " +
+        "этом поле не поддерживается — файл без расширения .json исполняется как код."
       ));
     }
 
@@ -415,9 +335,6 @@ export class ThreeDModelCardEditor extends HTMLElement {
     }
     root.appendChild(modelBlock);
 
-    // --- файлы моделей в хранилище браузера (T-010) ---
-    root.appendChild(this._assetBlock(c));
-
     // --- общие настройки ---
     const baseBlock = el("div", "t3d-ed-block");
     baseBlock.appendChild(el("div", "t3d-ed-h", "Оформление и поведение"));
@@ -426,7 +343,7 @@ export class ThreeDModelCardEditor extends HTMLElement {
     titleInput.addEventListener("input", () => this._patch({ title: titleInput.value }));
     baseBlock.appendChild(field("Заголовок (пусто — скрыть)", titleInput));
 
-    const heightInput = input("number", c.height !== undefined ? c.height : "", "360");
+    const heightInput = input("number", c.height !== undefined ? c.height : "", "авто");
     heightInput.type = "number";
     heightInput.min = "140";
     heightInput.step = "20";
@@ -434,7 +351,9 @@ export class ThreeDModelCardEditor extends HTMLElement {
       const v = parseFloat(heightInput.value);
       this._patch({ height: Number.isFinite(v) ? v : undefined });
     });
-    baseBlock.appendChild(field("Высота, px", heightInput, "По умолчанию — рекомендуемая для модели."));
+    baseBlock.appendChild(field("Высота, px", heightInput,
+      "Пусто — карточка занимает всю доступную высоту (рекомендуется): в разделе — клетку сетки, "
+      + "в «кирпичной» раскладке — рекомендованную моделью высоту. Число задаёт фиксированную высоту в пикселях."));
 
     const checks = el("div", "t3d-ed-checks");
     checks.appendChild(checkbox("Показывать заголовок (HUD)", c.show_hud !== false, (v) => this._patch({ show_hud: v })));
@@ -502,6 +421,7 @@ export class ThreeDModelCardEditor extends HTMLElement {
     root.appendChild(foot);
 
     this._refreshStates();
+    return true;
   }
 
   /** Строка привязки: ha-entity-picker + (опционально) ручной ввод. */
@@ -557,7 +477,7 @@ export class ThreeDModelCardEditor extends HTMLElement {
       toggle.title = "Выбирать из списка сущностей";
       toggle.addEventListener("click", () => {
         this._manualEntity.delete(binding.key);
-        this._render();
+        this._renderIfNeeded(true);
       });
       if (customElements.get(HA_ENTITY_PICKER)) box.appendChild(toggle);
       return box;
@@ -723,7 +643,15 @@ export class ThreeDModelCardEditor extends HTMLElement {
       if (v === undefined) delete next[k];
       else next[k] = v;
     }
+    // Ничего не изменилось (поле вернуло то же значение) — лишний
+    // config-changed только заставляет Lovelace перерисовать диалог.
+    // reload_model — исключение: это команда «перечитать файл модели».
+    if (!patch.reload_model && canonicalJson(next) === canonicalJson(this._config)) return;
     this._config = next;
+    // DOM уже показывает новое значение (его поставил сам пользователь),
+    // поэтому отпечаток формы обновляем сразу: иначе эхо от HA (setConfig с тем
+    // же конфигом) сочтёт форму устаревшей и перерисует её, забрав фокус.
+    this._renderedKey = this._key();
     this.dispatchEvent(new CustomEvent("config-changed", {
       detail: { config: next },
       bubbles: true,
@@ -892,6 +820,20 @@ function modelDesc(model) {
   return m.description || `${m.name} · API v${m.apiVersion}`;
 }
 
+/**
+ * Канонический JSON: порядок ключей не важен.
+ *
+ * Конфиг приходит редактору то из YAML, то из формы, и порядок ключей в нём
+ * может отличаться — сравнивать значения обычным JSON.stringify нельзя, иначе
+ * форма будет перерисовываться «на пустом месте» и забирать фокус.
+ */
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return String(JSON.stringify(value));
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
+}
+
 function isUrl(v) {
   return typeof v === "string" && (/^(https?:)?\/\//.test(v) || v.startsWith("/") || v.endsWith(".js"));
 }
@@ -899,14 +841,6 @@ function isUrl(v) {
 function shortUrl(v) {
   const s = String(v);
   return s.length > 34 ? "…" + s.slice(-33) : s;
-}
-
-/** Человекочитаемый размер файла для списка загруженных моделей. */
-function formatSize(n) {
-  if (!Number.isFinite(n) || n < 0) return "";
-  if (n < 1024) return `${n} Б`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
-  return `${(n / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
 function partialMatch(value, needles) {
@@ -962,14 +896,6 @@ const EDITOR_CSS = `
 .t3d-ed-details summary { cursor: pointer; font-size: 12px; opacity: .8; margin-bottom: 8px; }
 .t3d-ed-grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
 @media (max-width: 520px) { .t3d-ed-grid3 { grid-template-columns: 1fr 1fr; } }
-/* Файлы моделей в браузере (T-010) */
-.t3d-ed-drop { border: 1px dashed var(--divider-color, rgba(130,150,180,.45)); border-radius: 8px;
-  padding: 10px 8px; text-align: center; font-size: 11.5px; opacity: .7; }
-.t3d-ed-asset { display: flex; align-items: center; gap: 8px; }
-.t3d-ed-asset-info { flex: 1; font-size: 11.5px;
-  font-family: var(--code-font-family, ui-monospace, Consolas, monospace);
-  word-break: break-all; opacity: .85; }
-.t3d-ed-btn-sm { font-size: 11px; padding: 3px 9px; flex: 0 0 auto; }
 `;
 
 export default ThreeDModelCardEditor;

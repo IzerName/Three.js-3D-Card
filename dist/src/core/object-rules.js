@@ -500,7 +500,17 @@ function prepareHinge(rule, obj, THREE) {
   // Геометрию сдвигаем так, чтобы точка подвеса оказалась в НАЧАЛЕ КООРДИНАТ
   // объекта, а сам объект ставим в эту точку. Тогда поворот на любой угол —
   // это просто поворот объекта вокруг своей оси, без пересчёта позиции.
+  //
+  // ВАЖНО: копируем геометрию ПЕРЕД переносом. Дерево модели приходит из кэша
+  // загрузчика (geometry.js: cloneObject копирует узлы и материалы, а геометрии
+  // остаются общими), и перенос необратим: без своей копии каждая следующая
+  // сцена — переподключение карточки, смена модели, любая правка конфигурации
+  // в редакторе — сдвигала бы створку ещё раз, и детали модели «съезжали».
   if (obj.geometry && obj.geometry.translate) {
+    if (!obj.userData._t3dOwnGeometry) {
+      obj.geometry = obj.geometry.clone();
+      obj.userData._t3dOwnGeometry = true;
+    }
     obj.geometry.translate(rule._hingeClosedPivot.x - obj.position.x,
       rule._hingeClosedPivot.y - obj.position.y,
       rule._hingeClosedPivot.z - obj.position.z);

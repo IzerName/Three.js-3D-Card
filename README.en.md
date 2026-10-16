@@ -61,7 +61,7 @@ Assistant's native entity picker for device selection.
 type: custom:threejs-3d-card
 model: water-tank
 title: Clean water tank
-height: 400
+# omit `height` — the card fills the available area
 entities:
   level: sensor.water_preparation_level_clean_percentage
   liters: sensor.water_preparation_level_clean_liters
@@ -93,7 +93,7 @@ you pick an entity from a filtered dropdown, showing the current value live.
 | `allow_external_models` | boolean | `true` | Set `false` to forbid model URLs |
 | `title` | string | from model | HUD title (`""` hides it) |
 | `show_hud` | boolean | `true` | Show the HUD title |
-| `height` | number | from model | Card height in pixels |
+| `height` | number | unset (auto) | Card height in pixels. When unset the card fills the available area (grid cell in a section, otherwise the height recommended by the model) |
 | `entities` | object | — | Bindings: `key: entity_id` |
 | `params` | object | from model | Model settings (flat keys) |
 | `camera` | object | from model | `radius`, `phi`, `theta`, `target`, `minRadius`, `maxRadius` |
@@ -118,6 +118,22 @@ Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 Put a file into `config/www/3d-models/my-model.js`, then select
 **Model → “Import model by URL…”** in the card editor and enter
 `/local/3d-models/my-model.js`.
+
+`config/www/3d-models/` is the folder Home Assistant serves as `/local/`. There
+is no upload from the card — HA has no API to write into `config/www` — so copy
+the files with whatever you already use: Samba share, File editor, Advanced SSH
+& Web Terminal or Studio Code Server. Put the geometry and materials the file
+refers to (`.glb`/`.gltf`, `.obj` + `.mtl`, textures) next to it: a `.json`
+**specification** can be used instead of model code
+([docs/OBJECT_MODEL.md](docs/OBJECT_MODEL.md)), and its relative paths
+(`source.url`, `source.mtl`) are resolved from the `.json` file.
+
+> ⚠️ Never put a `.glb` or `.obj` itself into the **Model** field: a file whose
+> name does not end with `.json` is executed as model code. Geometry is loaded
+> only through a specification or through model code.
+
+Set `reload_model: true` to re-read a file after replacing it on the server
+(browser cache).
 
 ```js
 
@@ -170,7 +186,7 @@ documented in [docs/MODEL_API.md](docs/MODEL_API.md).
 npm install
 npm run build     # build dist/ and the single-file threejs-3d-card.js in the root
 npm run serve     # dev bench: http://localhost:8099/dev/harness.html
-npm test          # unit and integration tests (185)
+npm test          # unit and integration tests
 npm run check     # build + tests
 ```
 
@@ -185,7 +201,7 @@ behave identically:
 
 * `threejs-3d-card.js` in the repository root — the **single-file build**
   (esbuild): three.js r160, the OBJ/MTL/glTF loaders, the card core and the
-  built-in models inside one ~911 KB file. This is what HACS installs;
+  built-in models inside one ~1 MB file. This is what HACS installs;
 * `dist/` — the same card as plain ES modules (`dist/threejs-3d-card.js` plus
   `src/`, `models/`, `vendor/`). The dev bench serves it; the layout is
   committed to the repository and CI verifies it against the build. No bundler
@@ -229,10 +245,10 @@ threejs-3d-card/
 ├─ src/                         card sources (card.js, editor.js, core/)
 ├─ models/                      built-in models: water-tank, production-room
 ├─ skills/threejs-3d-model/     agent skill: spec, validator, examples
-├─ docs/                        MODEL_API, OBJECT_MODEL, CONFIGURATION, HACS
+├─ docs/                        MODEL_API, OBJECT_MODEL, OBJECT_NAMES, CONFIGURATION, HACS
 ├─ dev/                         dev bench and browser self-check pages
 ├─ scripts/                     build.mjs (dist/ + root bundle), serve.mjs (dev server)
-└─ test/                        unit and integration tests (185)
+└─ test/                        unit and integration tests
 ```
 
 Both `dist/` and the root `threejs-3d-card.js` are produced by
